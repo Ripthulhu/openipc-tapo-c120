@@ -1,0 +1,250 @@
+#!/bin/sh
+
+EVENT_PID=/run/c120-eventd.pid
+BUTTON_PID=/run/c120-button-apd.pid
+CONF=/etc/c120-light-pins.conf
+EVENT_CONF=/etc/c120-eventd.conf
+AP_STATE=/run/c120-setup-ap.active
+LAMP_STATE=/tmp/c120-lamps.state
+LOG=/tmp/c120-eventd.log
+
+C120_RESET_GPIO="${C120_RESET_GPIO:-9}"
+C120_RESET_ACTIVE_VALUE="${C120_RESET_ACTIVE_VALUE:-0}"
+C120_RESET_HOLD_TICKS="${C120_RESET_HOLD_TICKS:-5}"
+C120_RESET_POLL_DELAY="${C120_RESET_POLL_DELAY:-0.2}"
+C120_CAMERA_LIGHT_PINS="${C120_CAMERA_LIGHT_PINS:-12 13}"
+C120_LIGHT_PINS_POLL="${C120_LIGHT_PINS_POLL:-0.5}"
+C120_LIGHT_PINS_RESPECT_EXCLUSIVE="${C120_LIGHT_PINS_RESPECT_EXCLUSIVE:-1}"
+C120_EVENTD_LOG="${C120_EVENTD_LOG:-0}"
+
+log() {
+	[ "$C120_EVENTD_LOG" = "1" ] || return 0
+	echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+}
+
+load_config() {
+	C120_RESET_GPIO="${C120_RESET_GPIO:-9}"
+	C120_RESET_ACTIVE_VALUE="${C120_RESET_ACTIVE_VALUE:-0}"
+	C120_RESET_HOLD_TICKS="${C120_RESET_HOLD_TICKS:-5}"
+	C120_RESET_POLL_DELAY="${C120_RESET_POLL_DELAY:-0.2}"
+	C120_CAMERA_LIGHT_PINS="${C120_CAMERA_LIGHT_PINS:-12 13}"
+	C120_LIGHT_PINS_POLL="${C120_LIGHT_PINS_POLL:-0.5}"
+	C120_LIGHT_PINS_RESPECT_EXCLUSIVE="${C120_LIGHT_PINS_RESPECT_EXCLUSIVE:-1}"
+	C120_EVENTD_LOG="${C120_EVENTD_LOG:-0}"
+
+	[ -f "$EVENT_CONF" ] && . "$EVENT_CONF"
+	[ -f "$CONF" ] && . "$CONF"
+	[ -n "$C120_EVENTD_LOG" ] || C120_EVENTD_LOG="${C120_LIGHT_PINS_LOG:-0}"
+
+	set -- $(printf '%s\n' "$C120_CAMERA_LIGHT_PINS" | tr ',;' '  ')
+	C120_CAMERA_LIGHT_PINS="$*"
+	C120_LEADER_PIN="${1:-}"
+	[ "$#" -gt 0 ] && shift
+	C120_EXTRA_PINS="$*"
+
+	case "$C120_LIGHT_PINS_POLL" in
+		0.1|.1) C120_LIGHT_PINS_TICKS=1 ;;
+		0.2|.2) C120_LIGHT_PINS_TICKS=1 ;;
+		0.3|.3|0.4|.4) C120_LIGHT_PINS_TICKS=2 ;;
+		0.5|.5|0.6|.6) C120_LIGHT_PINS_TICKS=3 ;;
+		0.7|.7|0.8|.8) C120_LIGHT_PINS_TICKS=4 ;;
+		1|1.0) C120_LIGHT_PINS_TICKS=5 ;;
+		*) C120_LIGHT_PINS_TICKS=3 ;;
+	esac
+}
+
+gpio_path() {
+	printf '/sys/class/gpio/gpio%s' "$1"
+}
+
+gpio_export() {
+	gpio="$1"
+	path="$(gpio_path "$gpio")"
+
+	[ -d "$path" ] || echo "$gpio" > /sys/class/gpio/export 2>/dev/null || true
+	[ -d "$path" ]
+}
+
+gpio_direction() {
+	gpio="$1"
+	direction="$2"
+	path="$(gpio_path "$gpio")"
+
+	gpio_export "$gpio" || return 1
+	[ -e "$path/direction" ] && echo "$direction" > "$path/direction" 2>/dev/null || true
+}
+
+gpio_read() {
+	gpio="$1"
+	fallback="${2:-0}"
+	path="$(gpio_path "$gpio")"
+	value="$fallback"
+
+	gpio_export "$gpio" || {
+		printf '%s\n' "$fallback"
+		return 1
+	}
+	if [ -r "$path/value" ]; then
+		IFS= read -r value < "$path/value" 2>/dev/null || value="$fallback"
+	fi
+	printf '%s\n' "${value:-$fallback}"
+}
+
+gpio_write() {
+	gpio="$1"
+	value="$2"
+	path="$(gpio_path "$gpio")"
+
+	gpio_direction "$gpio" out || return 1
+	[ -e "$path/value" ] && echo "$value" > "$path/value" 2>/dev/null || true
+}
+
+exclusive_lamp_mode() {
+	[ "$C120_LIGHT_PINS_RESPECT_EXCLUSIVE" = "1" ] || return 1
+	[ -f "$LAMP_STATE" ] || return 1
+
+	mode=
+	IFS= read -r mode < "$LAMP_STATE" 2>/dev/null || true
+	[ "$mode" = "850" ] || [ "$mode" = "940" ]
+}
+
+sync_once() {
+	leader="$C120_LEADER_PIN"
+	[ -n "$leader" ] || return 0
+	[ -n "$C120_EXTRA_PINS" ] || return 0
+	[ -f "$AP_STATE" ] && return 0
+	exclusive_lamp_mode && return 0
+
+	value="$(gpio_read "$leader" 0)"
+	case "$value" in
+		1) value=1 ;;
+		*) value=0 ;;
+	esac
+
+	for gpio in $C120_EXTRA_PINS; do
+		[ "$gpio" = "$leader" ] && continue
+		gpio_write "$gpio" "$value" || true
+	done
+}
+
+status() {
+	leader="$C120_LEADER_PIN"
+	mode=
+	[ -f "$LAMP_STATE" ] && IFS= read -r mode < "$LAMP_STATE" 2>/dev/null || true
+
+	if [ -s "$EVENT_PID" ] && kill -0 "$(cat "$EVENT_PID")" 2>/dev/null; then
+		echo "eventd=running"
+	else
+		echo "eventd=stopped"
+	fi
+	printf 'pins="%s"\n' "$C120_CAMERA_LIGHT_PINS"
+	printf 'leader=%s value=%s\n' "$leader" "$(gpio_read "$leader" 0)"
+	printf 'extras="%s"\n' "$C120_EXTRA_PINS"
+	for gpio in $C120_EXTRA_PINS; do
+		printf 'extra_%s=%s\n' "$gpio" "$(gpio_read "$gpio" 0)"
+	done
+	printf 'lamp_state=%s\n' "$mode"
+	if [ -f "$AP_STATE" ]; then
+		echo "mirror=paused-setup-ap"
+	elif exclusive_lamp_mode; then
+		echo "mirror=paused-exclusive"
+	else
+		echo "mirror=active"
+	fi
+	printf 'reset_gpio=%s value=%s active=%s hold_ticks=%s\n' \
+		"$C120_RESET_GPIO" \
+		"$(gpio_read "$C120_RESET_GPIO" "$((1 - C120_RESET_ACTIVE_VALUE))")" \
+		"$C120_RESET_ACTIVE_VALUE" \
+		"$C120_RESET_HOLD_TICKS"
+	if [ -f "$AP_STATE" ]; then
+		echo "setup_ap=active"
+	else
+		echo "setup_ap=inactive"
+	fi
+}
+
+toggle_ap() {
+	if [ -f "$AP_STATE" ]; then
+		log "reset button held; stopping setup AP"
+		/usr/bin/c120-setup-ap stop >/dev/null 2>&1
+	else
+		log "reset button held; starting setup AP"
+		/usr/bin/c120-setup-ap start >/dev/null 2>&1
+	fi
+}
+
+cleanup() {
+	rm -f "$EVENT_PID" "$BUTTON_PID"
+	exit 0
+}
+
+daemon() {
+	load_config
+	echo $$ > "$EVENT_PID"
+	echo $$ > "$BUTTON_PID"
+	trap 'load_config; gpio_direction "$C120_RESET_GPIO" in; log "reloaded config"' HUP
+	trap cleanup INT TERM
+
+	gpio_direction "$C120_RESET_GPIO" in
+	sync_once
+	log "started gpio=$C120_RESET_GPIO active=$C120_RESET_ACTIVE_VALUE hold=$C120_RESET_HOLD_TICKS reset_poll=$C120_RESET_POLL_DELAY"
+
+	held=0
+	pressed=0
+	light_tick=0
+
+	while true; do
+		value="$(gpio_read "$C120_RESET_GPIO" "$((1 - C120_RESET_ACTIVE_VALUE))")"
+		if [ "$value" = "$C120_RESET_ACTIVE_VALUE" ]; then
+			if [ "$pressed" = "0" ]; then
+				log "reset button down"
+				pressed=1
+			fi
+			held=$((held + 1))
+			if [ "$held" -ge "$C120_RESET_HOLD_TICKS" ]; then
+				toggle_ap
+				while [ "$(gpio_read "$C120_RESET_GPIO" "$((1 - C120_RESET_ACTIVE_VALUE))")" = "$C120_RESET_ACTIVE_VALUE" ]; do
+					sleep "$C120_RESET_POLL_DELAY"
+				done
+				held=0
+				pressed=0
+				log "reset button released"
+			fi
+		else
+			held=0
+			pressed=0
+		fi
+
+		light_tick=$((light_tick + 1))
+		if [ "$light_tick" -ge "$C120_LIGHT_PINS_TICKS" ]; then
+			sync_once
+			light_tick=0
+		fi
+
+		sleep "$C120_RESET_POLL_DELAY"
+	done
+}
+
+load_config
+
+case "${1:-status}" in
+	daemon)
+		daemon
+		;;
+	status)
+		status
+		;;
+	sync)
+		sync_once
+		;;
+	reload)
+		[ -s "$EVENT_PID" ] && kill -HUP "$(cat "$EVENT_PID")" 2>/dev/null || true
+		;;
+	stop)
+		[ -s "$EVENT_PID" ] && kill "$(cat "$EVENT_PID")" 2>/dev/null || true
+		;;
+	*)
+		echo "usage: $0 [daemon|status|sync|reload|stop]" >&2
+		exit 2
+		;;
+esac

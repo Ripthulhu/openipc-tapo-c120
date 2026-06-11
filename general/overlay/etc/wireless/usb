@@ -23,6 +23,13 @@ if [ "$1" = "rtl8188fu-generic" ]; then
 	exit 0
 fi
 
+# TP-Link Tapo C120 v1
+if [ "$1" = "rtl8188fu-ssc377-tapo-c120" ]; then
+	set_gpio 42 1
+	modprobe 8188fu
+	exit 0
+fi
+
 # Generic RTL8733BU
 if [ "$1" = "rtl8733bu-generic" ]; then
 	modprobe 8733bu

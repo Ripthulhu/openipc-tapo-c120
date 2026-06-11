@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+out=/tmp/wpa_supplicant.conf
+tmp="$out.$$"
+
+printf 'ctrl_interface=/var/run/wpa_supplicant\nupdate_config=1\n' > "$tmp"
+
+add_network() {
+	ssid="$1"
+	psk="$2"
+	[ -n "$ssid" ] || return 0
+	[ -n "$psk" ] || return 0
+
+	wpa_passphrase "$ssid" "$psk" | sed 's/#psk.*/scan_ssid=1/g' >> "$tmp"
+}
+
+get_env() {
+	fw_printenv -n "$1" 2>/dev/null || true
+}
+
+add_network "$(get_env wlanssid)" "$(get_env wlanpass)"
+add_network "$(get_env wlanssid2)" "$(get_env wlanpass2)"
+add_network "$(get_env wlanssid3)" "$(get_env wlanpass3)"
+
+if ! grep -q '^network={' "$tmp"; then
+	rm -f "$tmp"
+	echo "No Wi-Fi networks configured in U-Boot env" >&2
+	exit 1
+fi
+
+chmod 600 "$tmp"
+mv "$tmp" "$out"

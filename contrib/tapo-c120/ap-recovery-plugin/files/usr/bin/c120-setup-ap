@@ -1,0 +1,255 @@
+#!/bin/sh
+
+AP_SSID="${C120_SETUP_SSID:-C120-Setup}"
+AP_IP="${C120_SETUP_IP:-192.168.4.1}"
+AP_NETMASK="${C120_SETUP_NETMASK:-255.255.255.0}"
+AP_CHANNEL="${C120_SETUP_CHANNEL:-1}"
+AP_COUNTRY="${C120_SETUP_COUNTRY:-NL}"
+C120_SETUP_AP_LOG_MEMORY="${C120_SETUP_AP_LOG_MEMORY:-0}"
+STATE=/run/c120-setup-ap.active
+SERVICE_STATE=/run/c120-setup-ap-services
+LOG=/tmp/c120-setup-ap.log
+WPA_CONF=/tmp/c120-setup-ap-wpa.conf
+HOSTAPD_CONF=/tmp/c120-setup-ap-hostapd.conf
+UDHCPD_CONF=/tmp/c120-setup-ap-udhcpd.conf
+WPA_PID=/run/c120-setup-ap-wpa.pid
+HOSTAPD_PID=/run/c120-setup-ap-hostapd.pid
+UDHCPD_PID=/run/c120-setup-ap-udhcpd.pid
+HTTPD_PID=/run/c120-setup-ap-httpd.pid
+
+log() {
+	echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+}
+
+kill_pidfile() {
+	pidfile="$1"
+	if [ -s "$pidfile" ]; then
+		pid="$(cat "$pidfile" 2>/dev/null)"
+		[ -n "$pid" ] && kill "$pid" 2>/dev/null
+		rm -f "$pidfile"
+	fi
+}
+
+stop_ap_processes() {
+	kill_pidfile "$UDHCPD_PID"
+	kill_pidfile "$HOSTAPD_PID"
+	kill_pidfile "$WPA_PID"
+	killall -q udhcpd 2>/dev/null
+	killall -q hostapd 2>/dev/null
+	killall -q wpa_supplicant 2>/dev/null
+	killall -q udhcpc 2>/dev/null
+}
+
+log_memory() {
+	[ "$C120_SETUP_AP_LOG_MEMORY" = "1" ] || return 0
+	label="$1"
+	if command -v free >/dev/null 2>&1; then
+		log "$label memory: $(free | awk '/^Mem:/ {print "total="$2 " used="$3 " free="$4 " shared="$5 " buffers="$6 " cached="$7}')"
+	fi
+}
+
+stop_service_if_running() {
+	script="$1"
+	proc="$2"
+	pidfile="$3"
+	path="/etc/init.d/$script"
+	running=0
+	if [ -n "$pidfile" ] && [ -s "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+		running=1
+	elif [ -n "$proc" ] && pidof "$proc" >/dev/null 2>&1; then
+		running=1
+	fi
+	if [ -x "$path" ] && [ "$running" = "1" ]; then
+		log "stopping $script for setup AP"
+		echo "$script" >> "$SERVICE_STATE"
+		"$path" stop >> "$LOG" 2>&1 || true
+		sleep 1
+		[ -n "$proc" ] && pidof "$proc" >/dev/null 2>&1 && killall -q "$proc" 2>/dev/null || true
+	fi
+}
+
+start_saved_services() {
+	[ -s "$SERVICE_STATE" ] || return 0
+	while read -r script; do
+		[ -n "$script" ] || continue
+		if [ -x "/etc/init.d/$script" ]; then
+			log "starting $script after setup AP"
+			"/etc/init.d/$script" start >> "$LOG" 2>&1 || true
+		fi
+	done < "$SERVICE_STATE"
+	rm -f "$SERVICE_STATE"
+}
+
+start_setup_httpd() {
+	kill_pidfile "$HTTPD_PID"
+	if command -v httpd >/dev/null 2>&1; then
+		HTTPD_BIN="$(command -v httpd)"
+	elif command -v busybox >/dev/null 2>&1; then
+		HTTPD_BIN="busybox httpd"
+	else
+		log "no lightweight httpd available for setup page"
+		return 0
+	fi
+
+	log "starting lightweight setup httpd on port 80"
+	$HTTPD_BIN -f -h /var/www -p 80 >> "$LOG" 2>&1 &
+	echo $! > "$HTTPD_PID"
+}
+
+stop_setup_httpd() {
+	kill_pidfile "$HTTPD_PID"
+	killall -q httpd 2>/dev/null || true
+}
+
+enter_ap_maintenance() {
+	rm -f "$SERVICE_STATE"
+	log_memory "before maintenance"
+	stop_service_if_running S95majestic majestic
+	stop_service_if_running S49ntpd ntpd
+	stop_service_if_running S60crond crond
+	stop_service_if_running S46c120-light-pins c120-light-pinsd /run/c120-light-pinsd.pid
+	echo 1 > /proc/sys/vm/drop_caches 2>/dev/null || true
+	log_memory "after maintenance"
+}
+
+start_ap() {
+	timeout="${1:-}"
+	: > "$LOG"
+	log "starting setup AP ssid=$AP_SSID ip=$AP_IP"
+	touch "$STATE"
+	stop_ap_processes
+	enter_ap_maintenance
+
+	ifconfig wlan0 down 2>/dev/null
+	sleep 1
+	ifconfig wlan0 up 2>/dev/null
+	iwconfig wlan0 power off 2>/dev/null || true
+	ifconfig wlan0 "$AP_IP" netmask "$AP_NETMASK" up
+
+	ap_started=0
+	if command -v hostapd >/dev/null 2>&1; then
+		mkdir -p /var/run/hostapd
+		for driver in nl80211 rtl871xdrv; do
+			cat > "$HOSTAPD_CONF" <<EOF
+interface=wlan0
+driver=$driver
+ctrl_interface=/var/run/hostapd
+ctrl_interface_group=0
+ssid=$AP_SSID
+country_code=$AP_COUNTRY
+ieee80211d=1
+hw_mode=g
+channel=$AP_CHANNEL
+beacon_int=100
+dtim_period=2
+auth_algs=1
+ignore_broadcast_ssid=0
+wmm_enabled=1
+ieee80211n=1
+max_num_sta=4
+ap_max_inactivity=300
+EOF
+			log "trying hostapd driver=$driver"
+			if hostapd -B -P "$HOSTAPD_PID" -f "$LOG" "$HOSTAPD_CONF" >> "$LOG" 2>&1; then
+				sleep 1
+				if [ -s "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID")" 2>/dev/null; then
+					ap_started=1
+					break
+				fi
+			fi
+		done
+	fi
+
+	if [ "$ap_started" != "1" ]; then
+		cat > "$WPA_CONF" <<EOF
+ctrl_interface=/var/run/wpa_supplicant
+ap_scan=2
+network={
+    ssid="$AP_SSID"
+    mode=2
+    frequency=2437
+    key_mgmt=NONE
+}
+EOF
+
+		if ! wpa_supplicant -B -i wlan0 -D nl80211,wext -c "$WPA_CONF" -P "$WPA_PID" >> "$LOG" 2>&1; then
+			log "wpa_supplicant AP mode failed; restoring station mode"
+			rm -f "$STATE"
+			ifdown -f wlan0 2>/dev/null
+			ifup wlan0 >> "$LOG" 2>&1
+			exit 1
+		fi
+	fi
+
+	sleep 1
+	ifconfig wlan0 "$AP_IP" netmask "$AP_NETMASK" up
+	mkdir -p /var/lib/misc
+	touch /tmp/c120-setup-ap.leases
+	cat > "$UDHCPD_CONF" <<EOF
+start 192.168.4.20
+end 192.168.4.200
+interface wlan0
+option subnet $AP_NETMASK
+option router $AP_IP
+option dns $AP_IP
+option lease 3600
+lease_file /tmp/c120-setup-ap.leases
+pidfile $UDHCPD_PID
+EOF
+	udhcpd -S "$UDHCPD_CONF" >> "$LOG" 2>&1 &
+	echo $! > "$UDHCPD_PID"
+	start_setup_httpd
+
+	iwconfig wlan0 >> "$LOG" 2>&1
+	log "setup AP active"
+	log_memory "setup AP active"
+
+	if [ -n "$timeout" ] && [ "$timeout" -gt 0 ] 2>/dev/null; then
+		(
+			sleep "$timeout"
+			[ -f "$STATE" ] && /usr/bin/c120-setup-ap stop
+		) >/dev/null 2>&1 &
+	fi
+}
+
+stop_ap() {
+	log "stopping setup AP and restoring station mode"
+	rm -f "$STATE"
+	stop_ap_processes
+	stop_setup_httpd
+	ifdown -f wlan0 2>/dev/null
+	sleep 1
+	ifup wlan0 >> "$LOG" 2>&1
+	start_saved_services
+	log_memory "station restored"
+}
+
+status_ap() {
+	if [ -f "$STATE" ]; then
+		echo "setup-ap=active"
+	else
+		echo "setup-ap=inactive"
+	fi
+	ip addr show wlan0 2>/dev/null | sed -n 's/^[[:space:]]*inet /inet /p'
+	wpa_cli -i wlan0 status 2>/dev/null | grep -E '^(mode|ssid|wpa_state|ip_address)=' || true
+}
+
+case "${1:-status}" in
+	start)
+		start_ap "${2:-}"
+		;;
+	stop)
+		stop_ap
+		;;
+	restart)
+		stop_ap
+		start_ap "${2:-}"
+		;;
+	status)
+		status_ap
+		;;
+	*)
+		echo "Usage: $0 {start [timeout_seconds]|stop|restart [timeout_seconds]|status}" >&2
+		exit 1
+		;;
+esac

@@ -1,0 +1,25 @@
+#!/bin/sh
+
+case "$1" in
+	start)
+		echo "C120 camera-light GPIO mirror is managed by c120-eventd."
+		[ -x /etc/init.d/S45c120-ap-button ] && /etc/init.d/S45c120-ap-button start
+		;;
+	stop)
+		echo "C120 camera-light GPIO mirror stop is a no-op; c120-eventd stays alive for the reset button."
+		;;
+	restart|reload)
+		/usr/bin/c120-eventd reload 2>/dev/null || true
+		/usr/bin/c120-eventd sync
+		;;
+	status)
+		/usr/bin/c120-eventd status
+		;;
+	sync)
+		/usr/bin/c120-eventd sync
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|reload|status|sync}"
+		exit 1
+		;;
+esac

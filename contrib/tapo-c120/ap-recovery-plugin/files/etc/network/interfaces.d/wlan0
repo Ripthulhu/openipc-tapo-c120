@@ -1,0 +1,5 @@
+auto wlan0
+iface wlan0 inet dhcp
+    pre-up /usr/bin/c120-wifi-conf
+    pre-up wpa_supplicant -B -i wlan0 -D nl80211,wext -c /tmp/wpa_supplicant.conf
+    post-down killall -q wpa_supplicant

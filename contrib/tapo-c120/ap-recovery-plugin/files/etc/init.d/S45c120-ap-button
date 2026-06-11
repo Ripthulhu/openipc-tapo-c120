@@ -1,0 +1,50 @@
+#!/bin/sh
+
+PID=/run/c120-eventd.pid
+
+start() {
+	echo "Starting C120 GPIO event daemon..."
+	if [ -s "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; then
+		return 0
+	fi
+	if [ -s /run/c120-button-apd.pid ]; then
+		kill "$(cat /run/c120-button-apd.pid)" 2>/dev/null || true
+	fi
+	if [ -s /run/c120-light-pinsd.pid ]; then
+		kill "$(cat /run/c120-light-pinsd.pid)" 2>/dev/null || true
+	fi
+	killall -q c120-button-apd 2>/dev/null || true
+	killall -q c120-light-pinsd 2>/dev/null || true
+	rm -f /run/c120-button-apd.pid /run/c120-light-pinsd.pid /tmp/c120-button-apd.stdout /tmp/c120-light-pinsd.stdout
+	nohup /usr/bin/c120-eventd daemon >/dev/null 2>&1 &
+	echo $! > "$PID"
+	echo $! > /run/c120-button-apd.pid
+}
+
+stop() {
+	echo "Stopping C120 GPIO event daemon..."
+	if [ -s "$PID" ]; then
+		kill "$(cat "$PID")" 2>/dev/null || true
+	fi
+	rm -f "$PID" /run/c120-button-apd.pid
+}
+
+case "$1" in
+	start|stop)
+		$1
+		;;
+	restart|reload)
+		stop
+		start
+		;;
+	status)
+		/usr/bin/c120-eventd status
+		;;
+	sync)
+		/usr/bin/c120-eventd sync
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|reload|status|sync}"
+		exit 1
+		;;
+esac

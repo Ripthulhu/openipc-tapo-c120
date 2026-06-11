@@ -18,6 +18,17 @@ expected to grow further.
 More information about the [project][project] is available in our [website][website]
 and on the [wiki][wiki].
 
+## TP-Link Tapo C120 v1
+
+This fork includes a C120-specific SSC377 lite profile:
+
+```sh
+make BOARD=ssc377_lite_tp-link-tapo-c120-v1
+```
+
+See `contrib/tapo-c120/` for the C120 recovery plugin, runtime helpers, and
+notes about the SC430AI IQ/config blob used by the working cameras.
+
 ## Support
 
 OpenIPC offers two levels of support.

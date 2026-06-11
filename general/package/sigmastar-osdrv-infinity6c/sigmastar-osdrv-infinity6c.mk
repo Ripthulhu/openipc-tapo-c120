@@ -17,7 +17,15 @@ define SIGMASTAR_OSDRV_INFINITY6C_INSTALL_TARGET_CMDS
 	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/firmware $(SIGMASTAR_OSDRV_INFINITY6C_PKGDIR)/files/sensor/firmware/*
 
 	$(INSTALL) -m 755 -d $(TARGET_DIR)/etc/sensors
-	$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors $(SIGMASTAR_OSDRV_INFINITY6C_PKGDIR)/files/sensor/configs/$(if $(OPENIPC_SNS_MODEL),$(OPENIPC_SNS_MODEL),*).bin
+	if [ -n "$(OPENIPC_SNS_MODEL)" ]; then \
+		if [ -f "$(SIGMASTAR_OSDRV_INFINITY6C_PKGDIR)/files/sensor/configs/$(OPENIPC_SNS_MODEL).bin" ]; then \
+			$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors $(SIGMASTAR_OSDRV_INFINITY6C_PKGDIR)/files/sensor/configs/$(OPENIPC_SNS_MODEL).bin; \
+		else \
+			echo "No IQ/config blob for sensor $(OPENIPC_SNS_MODEL); continuing without /etc/sensors/$(OPENIPC_SNS_MODEL).bin"; \
+		fi; \
+	else \
+		$(INSTALL) -m 644 -t $(TARGET_DIR)/etc/sensors $(SIGMASTAR_OSDRV_INFINITY6C_PKGDIR)/files/sensor/configs/*.bin; \
+	fi
 
 	$(INSTALL) -m 755 -d $(TARGET_DIR)/usr/bin
 	$(INSTALL) -m 755 -t $(TARGET_DIR)/usr/bin $(SIGMASTAR_OSDRV_INFINITY6C_PKGDIR)/files/script/*

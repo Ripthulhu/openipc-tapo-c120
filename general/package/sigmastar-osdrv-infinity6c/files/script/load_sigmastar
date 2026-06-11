@@ -4,14 +4,12 @@
 #
 
 MODULE=/lib/modules/5.10.61/sigmastar
-SENSOR=$(fw_printenv -n sensor)
+SENSOR=$(fw_printenv -n sensor 2>/dev/null)
+SRCFG=$(fw_printenv -n srcfg 2>/dev/null)
+SRCFG=${SRCFG:-"0 1 0 0 0 0"}
 
 detect_sensor() {
-	insmod $MODULE/sensor_config.ko
-	if [ -e /dev/srcfg ]; then
-		echo srcfg 0 1 0 0 0 0 > /dev/srcfg
-		rmmod sensor_config
-	fi
+	apply_srcfg
 
 	SENSOR=$(ipcinfo -s)
 	if ! grep -q fpv /etc/os-release; then
@@ -19,9 +17,17 @@ detect_sensor() {
 	fi
 }
 
+apply_srcfg() {
+	insmod $MODULE/sensor_config.ko 2>/dev/null
+	if [ -e /dev/srcfg ]; then
+		echo "srcfg $SRCFG" > /dev/srcfg
+		rmmod sensor_config 2>/dev/null
+	fi
+}
+
 set_sensor() {
 	case $SENSOR in
-		gc4653|imx335|imx415|os04a10|sc4336p|sc401ai|sc501ai|sc830ai|sc850sl)
+		gc4653|imx335|imx415|os04a10|sc4336p|sc401ai|sc430ai|sc501ai|sc830ai|sc850sl)
 			insmod $MODULE/sensor_${SENSOR}_mipi.ko chmap=1
 			;;
 		gc8613ya|os03a10|sc450ai|sc535hai|sp4329)
@@ -59,6 +65,7 @@ if [ -n "$DRIVER" ]; then
 fi
 
 echo -e "\n\e[1;32mSensor assigned - $SENSOR\e[0m\n" | logger -s -t OpenIPC
+apply_srcfg
 set_sensor
 
 exit 0

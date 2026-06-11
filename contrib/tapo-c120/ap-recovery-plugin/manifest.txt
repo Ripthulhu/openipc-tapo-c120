@@ -1,0 +1,31 @@
+name: openipc-c120-ap-recovery
+version: 2026.05.21
+target: TP-Link Tapo C120 on OpenIPC ssc377_lite
+install: sh ./install.sh
+
+files:
+  install.sh
+  README.md
+  hostapd-overlay.tgz
+  files/usr/bin/c120-setup-ap
+  files/usr/bin/c120-eventd
+  files/usr/bin/c120-button-apd
+  files/usr/bin/c120-wifi-conf
+  files/etc/init.d/S45c120-ap-button
+  files/etc/network/interfaces.d/wlan0
+  files/var/www/cgi-bin/c120-wifi-setup.cgi
+
+runtime_paths:
+  /usr/bin/c120-setup-ap
+  /usr/bin/c120-eventd
+  /usr/bin/c120-button-apd
+  /usr/bin/c120-wifi-conf
+  /etc/init.d/S45c120-ap-button
+  /etc/network/interfaces.d/wlan0
+  /var/www/cgi-bin/c120-wifi-setup.cgi
+  /usr/sbin/hostapd
+  /usr/bin/hostapd_cli
+  /usr/lib/libnl-3.so.200
+  /usr/lib/libnl-genl-3.so.200
+
+hostapd-overlay-sha256: a856e3ed876757580e24a3e7bd748c2d8e5da0176fae040191e64dd634b16d52

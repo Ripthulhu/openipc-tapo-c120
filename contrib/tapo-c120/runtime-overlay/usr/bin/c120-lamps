@@ -1,0 +1,163 @@
+#!/bin/sh
+
+STATE=/tmp/c120-lamps.state
+GPIO_IR_850=12
+GPIO_IR_940=13
+GPIO_WHITE=14
+PWM_CHIP=/sys/class/pwm/pwmchip0
+PWM_CHAN=1
+PWM_PERIOD=50000
+PWM_DUTY=${C120_WHITE_DUTY:-100}
+PWM_WHITE_ENABLE=${C120_PWM_WHITE_ENABLE:-0}
+
+gpio_set() {
+	local gpio="$1"
+	local value="$2"
+	local path="/sys/class/gpio/gpio${gpio}"
+
+	[ -d "$path" ] || echo "$gpio" > /sys/class/gpio/export 2>/dev/null || true
+	[ -e "$path/direction" ] && echo out > "$path/direction" 2>/dev/null || true
+	[ -e "$path/value" ] && echo "$value" > "$path/value" 2>/dev/null || true
+}
+
+pwm_path() {
+	echo "${PWM_CHIP}/pwm${PWM_CHAN}"
+}
+
+pwm_export() {
+	local path="$(pwm_path)"
+
+	[ -d "$PWM_CHIP" ] || return 1
+	[ -d "$path" ] || echo "$PWM_CHAN" > "$PWM_CHIP/export" 2>/dev/null || true
+	[ -d "$path" ]
+}
+
+pwm_off() {
+	local path="$(pwm_path)"
+
+	[ -e "$path/enable" ] && echo 0 > "$path/enable" 2>/dev/null || true
+	[ -e "$path/duty_cycle" ] && echo 0 > "$path/duty_cycle" 2>/dev/null || true
+}
+
+pwm_on() {
+	local path="$(pwm_path)"
+
+	[ "$PWM_WHITE_ENABLE" = "1" ] || return 0
+	pwm_export || return 1
+	[ -e "$path/enable" ] && echo 0 > "$path/enable" 2>/dev/null || true
+	echo "$PWM_PERIOD" > "$path/period" 2>/dev/null || true
+	echo "$PWM_DUTY" > "$path/duty_cycle" 2>/dev/null || true
+	echo 1 > "$path/enable" 2>/dev/null || true
+}
+
+night_on() {
+	wget -q -T1 localhost/night/on -O - >/dev/null 2>&1 || true
+}
+
+night_off() {
+	wget -q -T1 localhost/night/off -O - >/dev/null 2>&1 || true
+}
+
+ir_off() {
+	gpio_set "$GPIO_IR_850" 0
+	gpio_set "$GPIO_IR_940" 0
+}
+
+white_off() {
+	gpio_set "$GPIO_WHITE" 0
+	pwm_off
+}
+
+white_on() {
+	gpio_set "$GPIO_WHITE" 1
+	pwm_on
+}
+
+set_mode() {
+	case "$1" in
+		off)
+			ir_off
+			white_off
+			echo off > "$STATE"
+			;;
+		850)
+			white_off
+			night_on
+			gpio_set "$GPIO_IR_940" 0
+			gpio_set "$GPIO_IR_850" 1
+			echo 850 > "$STATE"
+			;;
+		940)
+			white_off
+			night_on
+			gpio_set "$GPIO_IR_850" 0
+			gpio_set "$GPIO_IR_940" 1
+			echo 940 > "$STATE"
+			;;
+		both|ir|850940)
+			white_off
+			night_on
+			gpio_set "$GPIO_IR_850" 1
+			gpio_set "$GPIO_IR_940" 1
+			echo both > "$STATE"
+			;;
+		white)
+			ir_off
+			night_off
+			white_on
+			echo white > "$STATE"
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+read_file() {
+	[ -e "$1" ] && cat "$1" 2>/dev/null || printf ''
+}
+
+status_json() {
+	local mode="off"
+	local pwm="$(pwm_path)"
+	local gpio850="/sys/class/gpio/gpio${GPIO_IR_850}/value"
+	local gpio940="/sys/class/gpio/gpio${GPIO_IR_940}/value"
+	local gpiowhite="/sys/class/gpio/gpio${GPIO_WHITE}/value"
+	local v850="$(read_file "$gpio850")"
+	local v940="$(read_file "$gpio940")"
+	local vwhite="$(read_file "$gpiowhite")"
+	local pduty="$(read_file "$pwm/duty_cycle")"
+
+	if [ "$vwhite" = "1" ]; then
+		mode=white
+	elif [ "$v850" = "1" ] && [ "$v940" = "1" ]; then
+		mode=both
+	elif [ "$v850" = "1" ]; then
+		mode=850
+	elif [ "$v940" = "1" ]; then
+		mode=940
+	else
+		mode=off
+	fi
+
+	printf '{"mode":"%s","ir850":%s,"ir940":%s,"white":%s,"pwmDuty":"%s"}\n' \
+		"$mode" \
+		"$([ "$v850" = "1" ] && echo true || echo false)" \
+		"$([ "$v940" = "1" ] && echo true || echo false)" \
+		"$([ "$vwhite" = "1" ] && echo true || echo false)" \
+		"$pduty"
+}
+
+case "${1:-status}" in
+	status)
+		status_json
+		;;
+	off|850|940|both|ir|850940|white)
+		set_mode "$1" || exit 1
+		status_json
+		;;
+	*)
+		echo "usage: $0 [status|off|850|940|both|white]" >&2
+		exit 2
+		;;
+esac

@@ -1,0 +1,14 @@
+#!/bin/sh
+
+case "${1:-status}" in
+	daemon)
+		exec /usr/bin/c120-eventd daemon
+		;;
+	status|sync|reload|stop)
+		exec /usr/bin/c120-eventd "$1"
+		;;
+	*)
+		echo "usage: $0 [daemon|status|sync|reload|stop]" >&2
+		exit 2
+		;;
+esac

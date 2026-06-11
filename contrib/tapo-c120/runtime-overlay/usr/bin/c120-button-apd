@@ -1,0 +1,3 @@
+#!/bin/sh
+
+exec /usr/bin/c120-eventd "${1:-daemon}"
