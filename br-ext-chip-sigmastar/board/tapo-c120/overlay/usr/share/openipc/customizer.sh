@@ -1,5 +1,7 @@
 #!/bin/sh
 
+# Installed only by the TP-Link Tapo C120 board profile.
+
 fw_setenv sensor sc430ai
 fw_setenv srcfg '0 1 1 0 1 1'
 fw_setenv wlandev rtl8188fu-ssc377-tapo-c120

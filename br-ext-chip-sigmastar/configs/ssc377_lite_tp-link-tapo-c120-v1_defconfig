@@ -72,3 +72,4 @@ BR2_PACKAGE_YAML_CLI=y
 
 # TP-Link Tapo C120 v1
 BR2_OPENIPC_SNS_MODEL="sc430ai"
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL)/overlay $(BR2_EXTERNAL)/../br-ext-chip-sigmastar/board/tapo-c120/overlay"

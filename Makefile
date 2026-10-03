@@ -17,7 +17,7 @@ BOARD := $(or $(shell whiptail --title "Available boards" --menu "Select a confi
 endif
 
 ifneq ($(BOARD),)
-CONFIG := $(shell find br-ext-*/configs/*_defconfig | grep -m1 $(BOARD))
+CONFIG := $(shell find br-ext-*/configs -name '$(BOARD)_defconfig' -print -quit)
 include $(CONFIG)
 endif
 
@@ -32,7 +32,7 @@ br-%: defconfig
 defconfig: prepare
 	@echo --- $(or $(CONFIG),$(error variable BOARD not found))
 	@cat $(CONFIG) $(PWD)/general/openipc.fragment > $(BR_CONF)
-	@grep -s '^BR2_GLOBAL_PATCH_DIR=' $(CONFIG) >> $(BR_CONF) || true
+	@grep -s -E '^BR2_(GLOBAL_PATCH_DIR|ROOTFS_OVERLAY)=' $(CONFIG) >> $(BR_CONF) || true
 	@$(BR_MAKE) BR2_DEFCONFIG=$(BR_CONF) defconfig
 
 prepare:

@@ -1,0 +1,6 @@
+contrib/tapo-c120/** text=auto eol=lf
+contrib/tapo-c120/**/*.tgz -text
+contrib/tapo-c120/ap-recovery-plugin/files/usr/bin/c120-eventd -text
+contrib/tapo-c120/runtime-overlay/usr/bin/c120-eventd -text
+br-ext-chip-sigmastar/board/tapo-c120/overlay/usr/share/openipc/customizer.sh text eol=lf
+.github/scripts/check_target_modules.sh text eol=lf

@@ -2,23 +2,31 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <math.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
-#define EVENT_CONF "/etc/c120-eventd.conf"
-#define LIGHT_CONF "/etc/c120-light-pins.conf"
-#define EVENT_PID "/run/c120-eventd.pid"
-#define BUTTON_PID "/run/c120-button-apd.pid"
-#define LOG_PATH "/tmp/c120-eventd.log"
-#define AP_STATE "/run/c120-setup-ap.active"
-#define LAMP_STATE "/tmp/c120-lamps.state"
+#ifndef C120_ROOT
+#define C120_ROOT ""
+#endif
+#define EVENT_CONF C120_ROOT "/etc/c120-eventd.conf"
+#define LIGHT_CONF C120_ROOT "/etc/c120-light-pins.conf"
+#define EVENT_PID C120_ROOT "/run/c120-eventd.pid"
+#define BUTTON_PID C120_ROOT "/run/c120-button-apd.pid"
+#define EVENT_LOCK C120_ROOT "/run/c120-eventd.lock"
+#define LOG_PATH C120_ROOT "/tmp/c120-eventd.log"
+#define AP_STATE C120_ROOT "/run/c120-setup-ap.active"
+#define LAMP_STATE C120_ROOT "/tmp/c120-lamps.state"
+#define GPIO_ROOT C120_ROOT "/sys/class/gpio"
 
 #define MAX_PINS 16
 
@@ -36,6 +44,8 @@ struct config {
 
 static volatile sig_atomic_t keep_running = 1;
 static volatile sig_atomic_t reload_requested = 0;
+static int read_first_line(const char *path, char *buf, size_t len);
+static int read_pid(const char *path);
 
 static void on_signal(int sig)
 {
@@ -58,11 +68,12 @@ static void log_msg(const struct config *cfg, const char *fmt, ...)
 	time_t now;
 	struct tm tm_now;
 	char ts[32];
+	struct stat st;
 
 	if (!cfg->log_enabled)
 		return;
 
-	fp = fopen(LOG_PATH, "a");
+	fp = fopen(LOG_PATH, stat(LOG_PATH, &st) == 0 && st.st_size > 65536 ? "w" : "a");
 	if (!fp)
 		return;
 
@@ -106,6 +117,17 @@ static void unquote(char *s)
 	}
 }
 
+static int parse_int(const char *value, int min, int max, int fallback)
+{
+	char *end;
+	long result;
+	errno = 0;
+	result = strtol(value, &end, 10);
+	if (errno || end == value || *end || result < min || result > max)
+		return fallback;
+	return (int)result;
+}
+
 static int parse_bool_int(const char *value, int fallback)
 {
 	if (!value || !*value)
@@ -114,7 +136,7 @@ static int parse_bool_int(const char *value, int fallback)
 		return 1;
 	if (!strcmp(value, "false") || !strcmp(value, "no") || !strcmp(value, "off"))
 		return 0;
-	return atoi(value) ? 1 : 0;
+	return parse_int(value, 0, 1, fallback);
 }
 
 static int parse_ms(const char *value, int fallback_ms)
@@ -126,7 +148,7 @@ static int parse_ms(const char *value, int fallback_ms)
 		return fallback_ms;
 
 	seconds = strtod(value, &end);
-	if (end == value || seconds <= 0.0)
+	if (end == value || *end || !isfinite(seconds) || seconds <= 0.0)
 		return fallback_ms;
 
 	if (seconds > 60.0)
@@ -139,22 +161,29 @@ static void parse_pins(struct config *cfg, char *value)
 {
 	char *tok;
 	int count = 0;
+	int pins[MAX_PINS];
 
 	for (char *p = value; *p; p++) {
 		if (*p == ',' || *p == ';')
 			*p = ' ';
 	}
 
-	for (tok = strtok(value, " \t"); tok && count < MAX_PINS; tok = strtok(NULL, " \t")) {
-		char *end = NULL;
-		long pin = strtol(tok, &end, 10);
-		if (end == tok || *end != '\0' || pin < 0 || pin > 255)
+	for (tok = strtok(value, " \t"); tok; tok = strtok(NULL, " \t")) {
+		int pin = parse_int(tok, 0, 255, -1);
+		int duplicate = 0;
+		if (pin < 0)
+			return;
+		for (int i = 0; i < count; i++)
+			duplicate |= pins[i] == pin;
+		if (duplicate)
 			continue;
-		cfg->pins[count++] = (int)pin;
+		if (count == MAX_PINS)
+			return;
+		pins[count++] = pin;
 	}
 
-	if (count > 0)
-		cfg->pin_count = count;
+	memcpy(cfg->pins, pins, (size_t)count * sizeof(*pins));
+	cfg->pin_count = count;
 }
 
 static void defaults(struct config *cfg)
@@ -210,13 +239,11 @@ static void parse_config_file(struct config *cfg, const char *path)
 		    !strcmp(key, "C120_RESET_LOG")) {
 			cfg->log_enabled = parse_bool_int(value, cfg->log_enabled);
 		} else if (!strcmp(key, "C120_RESET_GPIO")) {
-			cfg->reset_gpio = atoi(value);
+			cfg->reset_gpio = parse_int(value, 0, 255, cfg->reset_gpio);
 		} else if (!strcmp(key, "C120_RESET_ACTIVE_VALUE")) {
-			cfg->reset_active_value = atoi(value) ? 1 : 0;
+			cfg->reset_active_value = parse_bool_int(value, cfg->reset_active_value);
 		} else if (!strcmp(key, "C120_RESET_HOLD_TICKS")) {
-			int ticks = atoi(value);
-			if (ticks > 0 && ticks < 1000)
-				cfg->reset_hold_ticks = ticks;
+			cfg->reset_hold_ticks = parse_int(value, 1, 999, cfg->reset_hold_ticks);
 		} else if (!strcmp(key, "C120_RESET_POLL_DELAY")) {
 			cfg->reset_poll_ms = parse_ms(value, cfg->reset_poll_ms);
 		}
@@ -254,36 +281,39 @@ static int write_text(const char *path, const char *text)
 
 static void gpio_path(char *buf, size_t len, int gpio, const char *leaf)
 {
-	snprintf(buf, len, "/sys/class/gpio/gpio%d/%s", gpio, leaf);
+	snprintf(buf, len, GPIO_ROOT "/gpio%d/%s", gpio, leaf);
 }
 
 static int gpio_export(int gpio)
 {
-	char dir[64];
+	char dir[sizeof(GPIO_ROOT) + 32];
 	char text[16];
 
-	snprintf(dir, sizeof(dir), "/sys/class/gpio/gpio%d", gpio);
+	snprintf(dir, sizeof(dir), GPIO_ROOT "/gpio%d", gpio);
 	if (file_exists(dir))
 		return 0;
 
 	snprintf(text, sizeof(text), "%d", gpio);
-	write_text("/sys/class/gpio/export", text);
+	write_text(GPIO_ROOT "/export", text);
 	return file_exists(dir) ? 0 : -1;
 }
 
 static int gpio_direction(int gpio, const char *direction)
 {
-	char path[96];
+	char path[sizeof(GPIO_ROOT) + 48];
+	char current[16];
 
 	if (gpio_export(gpio) < 0)
 		return -1;
 	gpio_path(path, sizeof(path), gpio, "direction");
+	if (read_first_line(path, current, sizeof(current)) == 0 && !strcmp(current, direction))
+		return 0;
 	return write_text(path, direction);
 }
 
 static int gpio_read_value(int gpio, int fallback)
 {
-	char path[96];
+	char path[sizeof(GPIO_ROOT) + 48];
 	char value = '\0';
 	int fd;
 
@@ -295,19 +325,30 @@ static int gpio_read_value(int gpio, int fallback)
 	if (fd < 0)
 		return fallback;
 
-	if (read(fd, &value, 1) != 1)
-		value = fallback ? '1' : '0';
+	if (read(fd, &value, 1) != 1) {
+		close(fd);
+		return fallback;
+	}
 	close(fd);
 
-	return value == '1' ? 1 : 0;
+	return value == '1' ? 1 : value == '0' ? 0 : fallback;
 }
 
 static int gpio_write_value(int gpio, int value)
 {
-	char path[96];
+	char path[sizeof(GPIO_ROOT) + 48];
+	char direction[16];
 
-	if (gpio_direction(gpio, "out") < 0)
+	if (gpio_export(gpio) < 0)
 		return -1;
+	gpio_path(path, sizeof(path), gpio, "direction");
+	if (read_first_line(path, direction, sizeof(direction)) < 0)
+		return -1;
+	/* Set the initial output level atomically; writing "out" first drives low. */
+	if (strcmp(direction, "out"))
+		return write_text(path, value ? "high" : "low");
+	if (gpio_read_value(gpio, -1) == value)
+		return 0;
 
 	gpio_path(path, sizeof(path), gpio, "value");
 	return write_text(path, value ? "1" : "0");
@@ -352,12 +393,15 @@ static int sync_light(const struct config *cfg)
 		return 0;
 
 	leader = cfg->pins[0];
-	value = gpio_read_value(leader, 0);
+	value = gpio_read_value(leader, -1);
+	if (value < 0)
+		return 1;
 
 	for (int i = 1; i < cfg->pin_count; i++) {
 		if (cfg->pins[i] == leader)
 			continue;
-		gpio_write_value(cfg->pins[i], value);
+		if (cfg->pins[i] == cfg->reset_gpio || gpio_write_value(cfg->pins[i], value) < 0)
+			return 1;
 	}
 
 	return 0;
@@ -374,27 +418,36 @@ static void write_pid_file(const char *path)
 
 static void remove_pid_files(void)
 {
-	unlink(EVENT_PID);
-	unlink(BUTTON_PID);
+	if (read_pid(EVENT_PID) == (int)getpid())
+		unlink(EVENT_PID);
+	if (read_pid(BUTTON_PID) == (int)getpid())
+		unlink(BUTTON_PID);
 }
 
 static int read_pid(const char *path)
 {
 	char buf[32];
-	char *end = NULL;
-	long pid;
 
 	if (read_first_line(path, buf, sizeof(buf)) < 0)
 		return -1;
-	pid = strtol(buf, &end, 10);
-	if (end == buf || pid <= 0)
+	return parse_int(buf, 2, INT_MAX, -1);
+}
+
+static int daemon_pid(void)
+{
+	int pid = read_pid(EVENT_PID);
+	char path[64], name[32];
+	if (pid < 0 || kill(pid, 0) < 0)
 		return -1;
-	return (int)pid;
+	snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+	if (read_first_line(path, name, sizeof(name)) < 0 || strcmp(name, "c120-eventd"))
+		return -1;
+	return pid;
 }
 
 static int signal_daemon(int sig)
 {
-	int pid = read_pid(EVENT_PID);
+	int pid = daemon_pid();
 	if (pid < 0) {
 		fprintf(stderr, "c120-eventd is not running\n");
 		return 1;
@@ -410,24 +463,43 @@ static void control_ap(const struct config *cfg)
 {
 	int active = file_exists(AP_STATE);
 	const char *cmd = active ?
-	    "/usr/bin/c120-setup-ap stop >/dev/null 2>&1" :
-	    "/usr/bin/c120-setup-ap start >/dev/null 2>&1";
+	    C120_ROOT "/usr/bin/c120-setup-ap stop >/dev/null 2>&1" :
+	    C120_ROOT "/usr/bin/c120-setup-ap start >/dev/null 2>&1";
 
 	log_msg(cfg, "%s setup AP", active ? "stopping" : "starting");
-	(void)system(cmd);
+	if (system(cmd) != 0)
+		log_msg(cfg, "setup AP transition failed");
 }
 
-static void daemon_loop(void)
+static void sleep_ms(int ms)
+{
+	struct timespec delay = { ms / 1000, (long)(ms % 1000) * 1000000L };
+	while (nanosleep(&delay, &delay) < 0 && errno == EINTR && keep_running && !reload_requested)
+		;
+}
+
+static int daemon_loop(void)
 {
 	struct config cfg;
 	int pressed = 0;
 	int held = 0;
 	int light_elapsed = 0;
+	int lock_fd;
+	struct sigaction action = {0};
 
 	load_config(&cfg);
-	signal(SIGHUP, on_signal);
-	signal(SIGTERM, on_signal);
-	signal(SIGINT, on_signal);
+	lock_fd = open(EVENT_LOCK, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+	if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB) < 0) {
+		fprintf(stderr, "c120-eventd: cannot acquire daemon lock\n");
+		if (lock_fd >= 0)
+			close(lock_fd);
+		return 1;
+	}
+	action.sa_handler = on_signal;
+	sigemptyset(&action.sa_mask);
+	sigaction(SIGHUP, &action, NULL);
+	sigaction(SIGTERM, &action, NULL);
+	sigaction(SIGINT, &action, NULL);
 
 	write_pid_file(EVENT_PID);
 	write_pid_file(BUTTON_PID);
@@ -443,9 +515,10 @@ static void daemon_loop(void)
 		int value;
 
 		if (reload_requested) {
+			reload_requested = 0;
 			load_config(&cfg);
 			gpio_direction(cfg.reset_gpio, "in");
-			reload_requested = 0;
+			pressed = held = light_elapsed = 0;
 			log_msg(&cfg, "reloaded config");
 		}
 
@@ -462,7 +535,8 @@ static void daemon_loop(void)
 				while (keep_running &&
 				    gpio_read_value(cfg.reset_gpio, cfg.reset_active_value ? 0 : 1) ==
 				    cfg.reset_active_value) {
-					usleep((useconds_t)cfg.reset_poll_ms * 1000U);
+					/* Reload after release, without turning the held button into a second press. */
+					sleep_ms(cfg.reset_poll_ms);
 				}
 				pressed = 0;
 				held = 0;
@@ -479,8 +553,11 @@ static void daemon_loop(void)
 			light_elapsed = 0;
 		}
 
-		usleep((useconds_t)cfg.reset_poll_ms * 1000U);
+		sleep_ms(cfg.reset_poll_ms);
 	}
+	remove_pid_files();
+	close(lock_fd);
+	return 0;
 }
 
 static int status_cmd(void)
@@ -493,7 +570,7 @@ static int status_cmd(void)
 	leader = cfg.pin_count > 0 ? cfg.pins[0] : -1;
 	read_first_line(LAMP_STATE, mode, sizeof(mode));
 
-	printf("eventd=%s\n", read_pid(EVENT_PID) > 0 ? "running" : "stopped");
+	printf("eventd=%s\n", daemon_pid() > 0 ? "running" : "stopped");
 	printf("pins=\"");
 	for (int i = 0; i < cfg.pin_count; i++)
 		printf("%s%d", i ? " " : "", cfg.pins[i]);
@@ -531,8 +608,7 @@ int main(int argc, char **argv)
 	const char *cmd = argc > 1 ? argv[1] : "status";
 
 	if (!strcmp(cmd, "daemon")) {
-		daemon_loop();
-		return 0;
+		return daemon_loop();
 	}
 	if (!strcmp(cmd, "status"))
 		return status_cmd();

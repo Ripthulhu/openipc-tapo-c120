@@ -8,7 +8,7 @@ C120 that should have physical reset-button Wi-Fi recovery.
 
 ## What It Adds
 
-- Single resident GPIO event helper for reset-button AP toggle and light-pin
+- Single resident native GPIO event helper for reset-button AP toggle and light-pin
   mirroring.
 - Reset button toggle on GPIO9, active-low.
 - Open setup AP named `C120-Setup`.
@@ -27,16 +27,18 @@ To keep AP mode stable on the 32 MB Linux memory budget, the AP helper stops
 Majestic, NTP, and cron while setup mode is active. Dropbear and `c120-eventd`
 stay running, so the button can still leave AP mode. Stopped services are
 restarted when station mode returns.
+Failed AP startup also restores these services. Concurrent transitions are
+locked, and repeated start/stop requests do not discard recovery state.
 
 ## Install
 
 Copy the packaged tarball to the camera, extract it, and run the installer:
 
 ```sh
-scp openipc-c120-ap-recovery-plugin-20260521.tgz root@<CAMERA_IP>:/tmp/
+scp openipc-c120-ap-recovery-plugin-20261004.tgz root@<CAMERA_IP>:/tmp/
 ssh root@<CAMERA_IP>
 cd /tmp
-gzip -dc openipc-c120-ap-recovery-plugin-20260521.tgz | tar -xf -
+gzip -dc openipc-c120-ap-recovery-plugin-20261004.tgz | tar -xf -
 cd openipc-c120-ap-recovery-plugin
 sh ./install.sh
 ```
@@ -44,6 +46,13 @@ sh ./install.sh
 The installer is idempotent. It backs up the previous `/etc/network/interfaces.d/wlan0`
 to `/root/c120-ap-recovery-backups/` and removes old `wlan0.*` backup files from
 `interfaces.d` so they are not parsed as extra interfaces.
+It verifies the native helper and hostapd checksums before stopping the old
+helper, and waits for the old process to exit before installing its replacement.
+It does not change Majestic settings.
+
+The bundled helper is built from `../c120-eventd.c` using
+`../build-plugin.sh`; it is an ARM hard-float, statically linked musl binary.
+Its checksum is recorded in `eventd.sha256`.
 
 Check the install state:
 

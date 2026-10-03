@@ -1,5 +1,5 @@
 name: openipc-c120-ap-recovery
-version: 2026.05.21
+version: 2026.10.04
 target: TP-Link Tapo C120 on OpenIPC ssc377_lite
 install: sh ./install.sh
 
@@ -7,6 +7,7 @@ files:
   install.sh
   README.md
   hostapd-overlay.tgz
+  eventd.sha256
   files/usr/bin/c120-setup-ap
   files/usr/bin/c120-eventd
   files/usr/bin/c120-button-apd

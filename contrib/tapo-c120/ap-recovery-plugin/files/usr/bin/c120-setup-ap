@@ -16,6 +16,7 @@ WPA_PID=/run/c120-setup-ap-wpa.pid
 HOSTAPD_PID=/run/c120-setup-ap-hostapd.pid
 UDHCPD_PID=/run/c120-setup-ap-udhcpd.pid
 HTTPD_PID=/run/c120-setup-ap-httpd.pid
+LOCK=/run/c120-setup-ap.lock
 
 log() {
 	echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
@@ -62,7 +63,7 @@ stop_service_if_running() {
 	if [ -x "$path" ] && [ "$running" = "1" ]; then
 		log "stopping $script for setup AP"
 		echo "$script" >> "$SERVICE_STATE"
-		"$path" stop >> "$LOG" 2>&1 || true
+		"$path" stop >> "$LOG" 2>&1 9>&- || true
 		sleep 1
 		[ -n "$proc" ] && pidof "$proc" >/dev/null 2>&1 && killall -q "$proc" 2>/dev/null || true
 	fi
@@ -74,7 +75,7 @@ start_saved_services() {
 		[ -n "$script" ] || continue
 		if [ -x "/etc/init.d/$script" ]; then
 			log "starting $script after setup AP"
-			"/etc/init.d/$script" start >> "$LOG" 2>&1 || true
+			"/etc/init.d/$script" start >> "$LOG" 2>&1 9>&- || true
 		fi
 	done < "$SERVICE_STATE"
 	rm -f "$SERVICE_STATE"
@@ -88,11 +89,11 @@ start_setup_httpd() {
 		HTTPD_BIN="busybox httpd"
 	else
 		log "no lightweight httpd available for setup page"
-		return 0
+		return 1
 	fi
 
 	log "starting lightweight setup httpd on port 80"
-	$HTTPD_BIN -f -h /var/www -p 80 >> "$LOG" 2>&1 &
+	$HTTPD_BIN -f -h /var/www -p 80 >> "$LOG" 2>&1 9>&- &
 	echo $! > "$HTTPD_PID"
 }
 
@@ -102,7 +103,8 @@ stop_setup_httpd() {
 }
 
 enter_ap_maintenance() {
-	rm -f "$SERVICE_STATE"
+	# Preserve the restoration list if an interrupted transition is retried.
+	touch "$SERVICE_STATE"
 	log_memory "before maintenance"
 	stop_service_if_running S95majestic majestic
 	stop_service_if_running S49ntpd ntpd
@@ -113,7 +115,7 @@ enter_ap_maintenance() {
 }
 
 start_ap() {
-	timeout="${1:-}"
+	[ -f "$STATE" ] && return 0
 	: > "$LOG"
 	log "starting setup AP ssid=$AP_SSID ip=$AP_IP"
 	touch "$STATE"
@@ -124,7 +126,10 @@ start_ap() {
 	sleep 1
 	ifconfig wlan0 up 2>/dev/null
 	iwconfig wlan0 power off 2>/dev/null || true
-	ifconfig wlan0 "$AP_IP" netmask "$AP_NETMASK" up
+	if ! ifconfig wlan0 "$AP_IP" netmask "$AP_NETMASK" up; then
+		stop_ap
+		return 1
+	fi
 
 	ap_started=0
 	if command -v hostapd >/dev/null 2>&1; then
@@ -150,13 +155,14 @@ max_num_sta=4
 ap_max_inactivity=300
 EOF
 			log "trying hostapd driver=$driver"
-			if hostapd -B -P "$HOSTAPD_PID" -f "$LOG" "$HOSTAPD_CONF" >> "$LOG" 2>&1; then
+			if hostapd -B -P "$HOSTAPD_PID" -f "$LOG" "$HOSTAPD_CONF" >> "$LOG" 2>&1 9>&-; then
 				sleep 1
 				if [ -s "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID")" 2>/dev/null; then
 					ap_started=1
 					break
 				fi
 			fi
+			kill_pidfile "$HOSTAPD_PID"
 		done
 	fi
 
@@ -172,17 +178,18 @@ network={
 }
 EOF
 
-		if ! wpa_supplicant -B -i wlan0 -D nl80211,wext -c "$WPA_CONF" -P "$WPA_PID" >> "$LOG" 2>&1; then
+		if ! wpa_supplicant -B -i wlan0 -D nl80211,wext -c "$WPA_CONF" -P "$WPA_PID" >> "$LOG" 2>&1 9>&-; then
 			log "wpa_supplicant AP mode failed; restoring station mode"
-			rm -f "$STATE"
-			ifdown -f wlan0 2>/dev/null
-			ifup wlan0 >> "$LOG" 2>&1
-			exit 1
+			stop_ap
+			return 1
 		fi
 	fi
 
 	sleep 1
-	ifconfig wlan0 "$AP_IP" netmask "$AP_NETMASK" up
+	if ! ifconfig wlan0 "$AP_IP" netmask "$AP_NETMASK" up; then
+		stop_ap
+		return 1
+	fi
 	mkdir -p /var/lib/misc
 	touch /tmp/c120-setup-ap.leases
 	cat > "$UDHCPD_CONF" <<EOF
@@ -196,30 +203,35 @@ option lease 3600
 lease_file /tmp/c120-setup-ap.leases
 pidfile $UDHCPD_PID
 EOF
-	udhcpd -S "$UDHCPD_CONF" >> "$LOG" 2>&1 &
+	# Foreground mode keeps $! equal to the actual DHCP server PID.
+	udhcpd -f -S "$UDHCPD_CONF" >> "$LOG" 2>&1 9>&- &
 	echo $! > "$UDHCPD_PID"
-	start_setup_httpd
+	if ! start_setup_httpd; then
+		stop_ap
+		return 1
+	fi
+	sleep 1
+	if ! kill -0 "$(cat "$UDHCPD_PID")" 2>/dev/null ||
+		! kill -0 "$(cat "$HTTPD_PID")" 2>/dev/null; then
+		log "setup DHCP or HTTP server failed; restoring station mode"
+		stop_ap
+		return 1
+	fi
 
 	iwconfig wlan0 >> "$LOG" 2>&1
 	log "setup AP active"
 	log_memory "setup AP active"
-
-	if [ -n "$timeout" ] && [ "$timeout" -gt 0 ] 2>/dev/null; then
-		(
-			sleep "$timeout"
-			[ -f "$STATE" ] && /usr/bin/c120-setup-ap stop
-		) >/dev/null 2>&1 &
-	fi
 }
 
 stop_ap() {
+	[ -f "$STATE" ] || [ -s "$SERVICE_STATE" ] || return 0
 	log "stopping setup AP and restoring station mode"
 	rm -f "$STATE"
 	stop_ap_processes
 	stop_setup_httpd
 	ifdown -f wlan0 2>/dev/null
 	sleep 1
-	ifup wlan0 >> "$LOG" 2>&1
+	ifup wlan0 >> "$LOG" 2>&1 9>&-
 	start_saved_services
 	log_memory "station restored"
 }
@@ -235,21 +247,27 @@ status_ap() {
 }
 
 case "${1:-status}" in
+	start|stop|restart)
+		exec 9>"$LOCK"
+		flock -n 9 || { echo "AP transition already in progress" >&2; exit 1; }
+		;;
+esac
+
+case "${1:-status}" in
 	start)
-		start_ap "${2:-}"
+		start_ap
 		;;
 	stop)
 		stop_ap
 		;;
 	restart)
-		stop_ap
-		start_ap "${2:-}"
+		stop_ap && start_ap
 		;;
 	status)
 		status_ap
 		;;
 	*)
-		echo "Usage: $0 {start [timeout_seconds]|stop|restart [timeout_seconds]|status}" >&2
+		echo "Usage: $0 {start|stop|restart|status}" >&2
 		exit 1
 		;;
 esac

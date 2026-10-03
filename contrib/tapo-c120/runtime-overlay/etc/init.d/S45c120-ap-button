@@ -4,38 +4,43 @@ PID=/run/c120-eventd.pid
 
 start() {
 	echo "Starting C120 GPIO event daemon..."
-	if [ -s "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; then
+	if /usr/bin/c120-eventd status | grep -q '^eventd=running$'; then
 		return 0
 	fi
-	if [ -s /run/c120-button-apd.pid ]; then
-		kill "$(cat /run/c120-button-apd.pid)" 2>/dev/null || true
-	fi
-	if [ -s /run/c120-light-pinsd.pid ]; then
-		kill "$(cat /run/c120-light-pinsd.pid)" 2>/dev/null || true
-	fi
-	killall -q c120-button-apd 2>/dev/null || true
-	killall -q c120-light-pinsd 2>/dev/null || true
-	rm -f /run/c120-button-apd.pid /run/c120-light-pinsd.pid /tmp/c120-button-apd.stdout /tmp/c120-light-pinsd.stdout
 	nohup /usr/bin/c120-eventd daemon >/dev/null 2>&1 &
-	echo $! > "$PID"
-	echo $! > /run/c120-button-apd.pid
+	new_pid=$!
+	for attempt in 1 2 3 4 5; do
+		if [ -s "$PID" ] && [ "$(cat "$PID")" = "$new_pid" ] && kill -0 "$new_pid" 2>/dev/null; then
+			return 0
+		fi
+		kill -0 "$new_pid" 2>/dev/null || return 1
+		sleep 0.1
+	done
+	return 1
 }
 
 stop() {
 	echo "Stopping C120 GPIO event daemon..."
-	if [ -s "$PID" ]; then
-		kill "$(cat "$PID")" 2>/dev/null || true
-	fi
-	rm -f "$PID" /run/c120-button-apd.pid
+	[ -s "$PID" ] || return 0
+	old_pid=$(cat "$PID")
+	/usr/bin/c120-eventd stop || return 1
+	for attempt in 1 2 3 4 5 6 7 8 9 10; do
+		kill -0 "$old_pid" 2>/dev/null || return 0
+		sleep 0.2
+	done
+	echo "C120 daemon is still stopping; restart aborted." >&2
+	return 1
 }
 
 case "$1" in
 	start|stop)
 		$1
 		;;
-	restart|reload)
-		stop
-		start
+	restart)
+		stop && start
+		;;
+	reload)
+		/usr/bin/c120-eventd reload
 		;;
 	status)
 		/usr/bin/c120-eventd status

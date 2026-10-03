@@ -2,7 +2,7 @@
 set -eu
 
 PLUGIN_NAME="openipc-c120-ap-recovery"
-VERSION="2026.05.21"
+VERSION="2026.10.04"
 HOSTAPD_SHA256="a856e3ed876757580e24a3e7bd748c2d8e5da0176fae040191e64dd634b16d52"
 BACKUP_DIR="/root/c120-ap-recovery-backups"
 
@@ -35,10 +35,12 @@ require_root() {
 check_payload() {
 	[ -d "$BASE/files" ] || fail "missing files/ payload directory"
 	[ -f "$BASE/hostapd-overlay.tgz" ] || fail "missing hostapd-overlay.tgz"
+	[ -f "$BASE/eventd.sha256" ] || fail "missing native helper checksum"
 
 	if command -v sha256sum >/dev/null 2>&1; then
 		actual="$(sha256sum "$BASE/hostapd-overlay.tgz" | awk '{print $1}')"
 		[ "$actual" = "$HOSTAPD_SHA256" ] || fail "hostapd overlay hash mismatch: $actual"
+		(cd "$BASE" && sha256sum -c eventd.sha256) || fail "native helper checksum mismatch"
 	fi
 }
 
@@ -88,6 +90,7 @@ stop_watcher() {
 		fail "setup AP is active; stop it before updating the plugin"
 	fi
 
+	old_pids=$(pidof c120-eventd c120-button-apd c120-light-pinsd 2>/dev/null || true)
 	if [ -x /etc/init.d/S45c120-ap-button ]; then
 		/etc/init.d/S45c120-ap-button stop >/dev/null 2>&1 || true
 	fi
@@ -96,6 +99,13 @@ stop_watcher() {
 	killall -q c120-eventd 2>/dev/null || true
 	killall -q c120-button-apd 2>/dev/null || true
 	killall -q c120-light-pinsd 2>/dev/null || true
+	for old_pid in $old_pids; do
+		for attempt in 1 2 3 4 5 6 7 8 9 10; do
+			kill -0 "$old_pid" 2>/dev/null || break
+			sleep 0.2
+		done
+		kill -0 "$old_pid" 2>/dev/null && fail "old helper $old_pid did not stop"
+	done
 	rm -f /run/c120-eventd.pid /run/c120-button-apd.pid /run/c120-light-pinsd.pid
 }
 

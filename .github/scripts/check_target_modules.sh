@@ -40,6 +40,13 @@ check_module() {
 }
 
 check_module BR2_PACKAGE_WIREGUARD_LINUX_COMPAT wireguard.ko
+if grep -q '^BR2_OPENIPC_SNS_MODEL="sc430ai"' "$CONFIG"; then
+	check_module BR2_PACKAGE_SIGMASTAR_OSDRV_SENSORS sensor_sc430ai_mipi.ko
+	if [ ! -s "$TARGET_DIR/etc/sensors/sc430ai.bin" ]; then
+		echo "MISSING: SC430AI IQ/config blob" >&2
+		fail=1
+	fi
+fi
 
 if [ "$fail" -ne 0 ]; then
 	echo "check_target_modules: regression detected" >&2
