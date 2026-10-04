@@ -114,7 +114,8 @@ The latest rolling Majestic and Web UI were fetched on 2026-10-04. Supporting
 packages include Mbed TLS 3.6.4, curl 8.15.0, and OpenIPC libevent at
 `694decef35717d8955aa34ba4d2baaaf61c9e4a9`.
 
-Both live cameras received the new Majestic, Web UI, libraries, CLI, updater,
+In the initial software-only stage, both cameras received the new Majestic,
+Web UI, libraries, CLI, updater,
 clock helpers, and compatible C120 light plugin. The old QHD hook is no longer
 installed or loaded. Wi-Fi credentials, root passwords, bitrates, kernel,
 bootloader, partition layout, and media-heap settings were preserved. Existing
@@ -142,7 +143,7 @@ The H.264 header still advertises 30 fps; counted frames over stream timestamps
 confirm the actual rate is approximately 20 fps. Physical button testing and a
 multi-hour stream soak remain separate checks.
 
-## Prepared Full Image
+## Verified Full Image
 
 The complete latest firmware built successfully from `84d98762`. C120-specific
 256 KiB SquashFS blocks and XZ ARM/ARM-Thumb compression let it fit the existing
@@ -167,12 +168,38 @@ fb6b203fde1fee82a2e13020abc82324680f568f972bb2ef0fe087ed0b8abf59  openipc.ssc377
 663debf35b66ccf5d3e8c5a36d2b9d00c1cafce9d07c1dbb02216cb01bf71447  usr/bin/majestic
 ```
 
-This image has **not** been flashed or boot-tested. The owner selected a
-software-only update now and preparation for a later full flash with UART
-recovery available. The existing firmware version shown in the Web UI is
-therefore intentionally unchanged; `/etc/c120-software-version` records the
-software-only update separately. Fresh installation retains the upstream
-password-claim and Majestic EULA flow for the human owner.
+The owner subsequently authorized a full flash over Wi-Fi, with UART recovery
+available if necessary. Both cameras were upgraded successfully on 2026-10-04;
+no UART recovery was needed. They now boot the October 4 kernel 5.10.61 #10
+and root filesystem `84d98762`, displaying firmware version `2.6.10.04`.
+Fresh installation still retains the upstream password-claim and Majestic
+EULA flow for the human owner; existing claimed credentials were preserved.
+
+Full flash backups and a logical overlay archive were stored privately off
+each camera before writing. With no SD device exposed, Majestic was stopped
+and the two raw image files were staged separately in `/tmp`, not an archive
+plus unpacked copies. About 6.5 MiB remained available before the RAM pivot.
+Upstream sysupgrade v1.0.69 was used with run-specific guards to abort if that
+pivot failed and leave U-Boot environment keys untouched. Bootloader and
+environment partition hashes remained identical, and independent SHA256
+readbacks of both written images matched the published hashes above.
+
+Retained overlay software was compared with ROM. The historical first-camera
+sensor/load-script override, firmware version stamp, and comment-only helper
+copies were reconciled with the new image. The separately installed AP/light
+plugin, Wi-Fi configuration, passwords, SSH identity, video settings and
+disabled crond were retained. No partition or media-heap change was needed.
+
+Each camera passed AP/setup-page/station restoration and an additional reboot.
+Final 60-second checks counted 1198 QHD H.264 frames on each, with 3001/3000
+Opus frames respectively. Bitrates stayed at 10000/6000 kbps; JPEG and motion
+remain off on the first camera and on on the second. Both helpers remained
+running, and available memory was approximately 9908/9568 KiB. Physical button
+presses and a multi-hour stream soak remain unverified in this rollout.
+
+Never substitute a generic SSC377 image or use validation-bypass flags for
+these upgrades. Preserve the settings partition unless deliberately doing a
+fresh installation, which returns the camera to the human claim/EULA flow.
 
 The full ARM build, native helper/form tests, QHD defaults/startup/pruning tests,
 CI selector self-test, workflow syntax checks, and upstream shell tests passed.
