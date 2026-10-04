@@ -258,5 +258,12 @@ Web UI exposes these controls under **Settings > Day / Night**. See
 [upstream day/night documentation](https://github.com/OpenIPC/wiki/blob/master/en/majestic-streamer.md#auto-daynight-detection)
 for the native policy and supported tuning keys.
 
+A separate full image was rebuilt from `251e59a5` with these new first-boot
+defaults. Kernel/rootfs sizes are 2039332/5140480 bytes, still within the same
+partitions. Packed-image checks confirmed the policy and unchanged Majestic
+binary. This newer package has not been flashed or boot-tested; the two live
+cameras remain on the verified `84d98762` base with the tested settings saved
+persistently. An additional flash was not needed for this configuration change.
+
 The full ARM build, native helper/form tests, QHD defaults/startup/pruning tests,
 CI selector self-test, workflow syntax checks, and upstream shell tests passed.
