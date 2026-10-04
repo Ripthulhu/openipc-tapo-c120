@@ -5,11 +5,10 @@
 ################################################################################
 
 LIBEVENT_OPENIPC_SITE_METHOD = git
-LIBEVENT_OPENIPC_SITE = https://github.com/libevent/libevent
-# Track libevent PR #1867 (EVENT__DISABLE_RPC / EVENT__DISABLE_EVENT_TAGGING /
-# EVENT__DISABLE_WS) while it is in review. Once it lands on master, replace
-# this with the merge commit SHA.
-LIBEVENT_OPENIPC_VERSION = refs/pull/1867/head
+LIBEVENT_OPENIPC_SITE = https://github.com/OpenIPC/libevent
+# Pinned OpenIPC fork includes the build toggles, musl mmap and WebSocket fixes.
+# A moving pull-request ref broke clean builds when its author rebased it.
+LIBEVENT_OPENIPC_VERSION = 694decef35717d8955aa34ba4d2baaaf61c9e4a9
 
 LIBEVENT_OPENIPC_INSTALL_STAGING = YES
 LIBEVENT_OPENIPC_LICENSE = BSD-3-Clause, OpenBSD
@@ -28,9 +27,7 @@ define LIBEVENT_OPENIPC_REMOVE_PYSCRIPT
 endef
 
 define LIBEVENT_OPENIPC_DELETE_UNUSED
-	rm -r $(TARGET_DIR)/usr/lib/libevent-2.2.so
-	rm -f $(TARGET_DIR)/usr/lib/libevent-2.2.so.1.0.0
-	rm -f $(TARGET_DIR)/usr/lib/libevent-2.2.so.1
+	rm -f $(TARGET_DIR)/usr/lib/libevent-2.2.so*
 	rm -f $(TARGET_DIR)/usr/lib/libevent.so
 endef
 
@@ -55,7 +52,9 @@ LIBEVENT_OPENIPC_CONF_OPTS += -DEVENT__DISABLE_MBEDTLS=ON
 endif
 
 ifeq ($(BR2_TOOLCHAIN_USES_MUSL),y)
+ifneq ($(BR2_aarch64),y)
 LIBEVENT_OPENIPC_CONF_OPTS += -DCMAKE_C_FLAGS="$(TARGET_CFLAGS) -DBROKEN_MMAP=1"
+endif
 endif
 
 LIBEVENT_OPENIPC_POST_INSTALL_TARGET_HOOKS += LIBEVENT_OPENIPC_DELETE_UNUSED

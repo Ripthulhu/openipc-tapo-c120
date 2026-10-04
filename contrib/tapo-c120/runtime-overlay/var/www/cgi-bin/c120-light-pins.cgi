@@ -1,4 +1,5 @@
-#!/bin/sh
+#!/usr/bin/haserl
+<%
 
 CONF=/etc/c120-light-pins.conf
 
@@ -12,27 +13,6 @@ Pragma: no-cache
 
 html_escape() {
 	sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'
-}
-
-param() {
-	name="$1="
-	old_ifs="$IFS"
-	IFS='&'
-	set -- ${QUERY_STRING:-}
-	IFS="$old_ifs"
-	for part do
-		case "$part" in
-			"$name"*)
-				printf '%s\n' "${part#"$name"}"
-				return 0
-				;;
-		esac
-	done
-}
-
-decode_pin_text() {
-	printf '%s' "$1" |
-		sed 's/+/ /g; s/%2[Cc]/,/g; s/%20/ /g; s/%09/ /g'
 }
 
 normalize_pins() {
@@ -61,24 +41,6 @@ leader_pin() {
 	printf '%s\n' "${1:-}"
 }
 
-current_pins() {
-	C120_CAMERA_LIGHT_PINS="12 13"
-	[ -f "$CONF" ] && . "$CONF"
-	printf '%s\n' "$C120_CAMERA_LIGHT_PINS"
-}
-
-current_poll() {
-	C120_LIGHT_PINS_POLL="0.5"
-	[ -f "$CONF" ] && . "$CONF"
-	printf '%s\n' "$C120_LIGHT_PINS_POLL"
-}
-
-current_exclusive() {
-	C120_LIGHT_PINS_RESPECT_EXCLUSIVE="1"
-	[ -f "$CONF" ] && . "$CONF"
-	printf '%s\n' "$C120_LIGHT_PINS_RESPECT_EXCLUSIVE"
-}
-
 write_config() {
 	pins="$1"
 	poll="$2"
@@ -101,15 +63,18 @@ header
 
 message=""
 error=""
-pins="$(current_pins)"
-poll="$(current_poll)"
-exclusive="$(current_exclusive)"
+C120_CAMERA_LIGHT_PINS="12 13"
+C120_LIGHT_PINS_POLL="0.5"
+C120_LIGHT_PINS_RESPECT_EXCLUSIVE="1"
+[ -f "$CONF" ] && . "$CONF"
+pins="$C120_CAMERA_LIGHT_PINS"
+poll="$C120_LIGHT_PINS_POLL"
+exclusive="$C120_LIGHT_PINS_RESPECT_EXCLUSIVE"
 
-if [ "$(param apply)" = "1" ]; then
-	raw_pins="$(decode_pin_text "$(param pins)")"
-	new_pins="$(normalize_pins "$raw_pins")"
-	new_poll="$(decode_pin_text "$(param poll)")"
-	new_exclusive="$(param exclusive)"
+if [ "${GET_apply:-}" = "1" ]; then
+	new_pins="$(normalize_pins "${GET_pins:-}")"
+	new_poll="${GET_poll:-}"
+	new_exclusive="${GET_exclusive:-}"
 	[ -n "$new_poll" ] || new_poll="0.2"
 	[ "$new_exclusive" = "1" ] || new_exclusive="0"
 
@@ -187,3 +152,4 @@ cat <<HTML
 </body>
 </html>
 HTML
+%>

@@ -1,32 +1,13 @@
-#!/bin/sh
+#!/usr/bin/haserl
+<%
 
-decode() {
-	printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"
-}
-
-param() {
-	name="$1="
-	old_ifs="$IFS"
-	IFS='&'
-	set -- ${QUERY_STRING:-}
-	IFS="$old_ifs"
-	for part do
-		case "$part" in
-			"$name"*)
-				printf '%s' "${part#"$name"}"
-				return 0
-				;;
-		esac
-	done
-}
-
-apply="$(param apply)"
+apply="${GET_apply:-}"
 ssid=
 psk=
 
 if [ "$apply" = "1" ]; then
-	ssid="$(decode "$(param ssid)")"
-	psk="$(decode "$(param psk)")"
+	ssid="${GET_ssid:-}"
+	psk="${GET_psk:-}"
 fi
 
 echo "HTTP/1.1 200 OK
@@ -79,3 +60,4 @@ cat <<'HTML'
 </body>
 </html>
 HTML
+%>

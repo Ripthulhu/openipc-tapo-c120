@@ -1,4 +1,4 @@
-"""Run on Linux with gcc. All GPIOs/services are simulated under a temp directory."""
+"""Run on Linux with gcc and Haserl. GPIOs/services are simulated under a temp directory."""
 import os
 import fcntl
 import re
@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from urllib.parse import urlencode
 
 
 BASE = Path(__file__).resolve().parent
@@ -167,6 +168,62 @@ stop_ap
     print("PASS AP recovery: duplicate start, failed startup restores services, redundant stop")
 
 
+def test_forms(root):
+    root.mkdir(parents=True)
+    (root / "tmp").mkdir()
+    haserl = shutil.which(os.environ.get("HASERL", "haserl"))
+    assert haserl, "Haserl is required to test the web forms"
+    calls = root / "wifi-calls"
+    config = root / "etc/c120-light-pins.conf"
+    helper = root / "light-pinsd"
+    write(helper, "#!/bin/sh\necho ready\n")
+    helper.chmod(0o755)
+    mocks = f'''
+fw_setenv() {{ printf '%s\\0' "$@" >> '{calls}'; }}
+nohup() {{ :; }}
+cli() {{ :; }}
+'''
+
+    def render(path, fields=None, cookie=""):
+        script = re.sub(r"/(?:etc|tmp)/", lambda match: str(root) + match[0],
+                        (BASE / path).read_text())
+        script = script.replace("#!/usr/bin/haserl", "#!" + haserl, 1)
+        script = script.replace("/usr/bin/c120-light-pinsd", str(helper))
+        script = script.replace("<%", "<%" + mocks, 1)
+        page = root / "test.cgi"
+        write(page, script)
+        env = dict(os.environ, REQUEST_METHOD="GET", QUERY_STRING=urlencode(fields or {}),
+                   HTTP_COOKIE=cookie)
+        result = subprocess.run([haserl, str(page)], env=env,
+                                capture_output=True, text=True, check=True)
+        assert not result.stderr, result.stderr
+        return result.stdout
+
+    wifi = "ap-recovery-plugin/files/var/www/cgi-bin/c120-wifi-setup.cgi"
+    assert '<form method="get"' in render(wifi, cookie="apply=1; ssid=ignored")
+    assert not calls.exists(), "cookies changed Wi-Fi settings"
+    ssid, psk = 'Lab + & " <tag>', r'Pass+%&\\with spaces'
+    output = render(wifi, {"apply": "1", "ssid": ssid, "psk": psk})
+    assert calls.read_bytes() == b"wlanssid\0" + ssid.encode() + b"\0wlanpass\0" + psk.encode() + b"\0"
+    assert "Saved Wi-Fi settings" in output and "<tag>" not in output
+
+    lights = "runtime-overlay/var/www/cgi-bin/c120-light-pins.cgi"
+    assert 'value="12 13"' in render(lights)
+    write(config, 'C120_CAMERA_LIGHT_PINS="13 12"\nC120_LIGHT_PINS_POLL="0.75"\nC120_LIGHT_PINS_RESPECT_EXCLUSIVE="0"\n')
+    output = render(lights)
+    assert 'value="13 12"' in output and 'value="0.75"' in output and " checked" not in output
+    output = render(lights, {"apply": "1", "pins": "12,13;14", "poll": "0.25", "exclusive": "1"})
+    assert "Saved" in output and 'C120_CAMERA_LIGHT_PINS="12 13 14"' in config.read_text()
+    saved = config.read_bytes()
+    for fields, message in (({"pins": "12,256", "poll": "0.25"}, "Invalid GPIO list"),
+                            ({"pins": "12,13", "poll": "invalid"}, "Invalid poll value")):
+        assert message in render(lights, {"apply": "1", **fields})
+        assert config.read_bytes() == saved, "invalid input changed configuration"
+    render(lights, {"apply": "1", "pins": "12 13"})
+    assert 'C120_LIGHT_PINS_RESPECT_EXCLUSIVE="0"' in config.read_text()
+    print("PASS forms: real Haserl decoding, Wi-Fi saves, GPIO settings and validation")
+
+
 def test_build(root):
     repo = BASE.parents[1]
     for sensor in ("sc430ai", ""):
@@ -218,6 +275,13 @@ include {package}
     assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
     write(target / "etc/sensors/sc430ai.bin", "fixture\n")
     subprocess.run(check, capture_output=True, check=True)
+    with config.open("a") as stream:
+        stream.write("BR2_PACKAGE_C120_QHD=y\n")
+    result = subprocess.run(check, capture_output=True, text=True)
+    assert result.returncode == 1 and "C120 QHD support" in result.stderr
+    write(target / "usr/lib/libc120-qhd.so", "fixture\n")
+    write(target / "etc/default/majestic", "fixture\n")
+    subprocess.run(check, capture_output=True, check=True)
     print("PASS builds: exact board selection, isolated C120 defaults, local sensor source destination")
 
 
@@ -226,4 +290,5 @@ if __name__ == "__main__":
         root = Path(tmp)
         test_daemon(root / "native")
         test_ap(root / "ap")
+        test_forms(root / "forms")
         test_build(root / "build")

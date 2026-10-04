@@ -1,0 +1,9 @@
+config BR2_PACKAGE_C120_QHD
+	bool "Tapo C120 QHD buffer fix"
+	depends on BR2_arm && BR2_TOOLCHAIN_USES_MUSL
+	depends on BR2_OPENIPC_SOC_FAMILY = "infinity6c"
+	depends on BR2_OPENIPC_SNS_MODEL = "sc430ai"
+	depends on BR2_PACKAGE_MAJESTIC
+	help
+	  Limit the main scaler queue before encoder binding so 2560x1440
+	  fits the C120's 32 MiB media heap. For the Infinity6C MI_SYS ABI only.

@@ -18,13 +18,28 @@ The board profile sets:
 - RTL8188FU USB Wi-Fi power enable on GPIO42
 - IR-cut GPIO81 with inverted single-coil polarity
 - camera light leader GPIO12
-- 2432x1376 H.264 at 60 fps, 10000 kbps CBR, GOP 60
+- 2560x1440 H.264 at 20 fps, 10000 kbps CBR, GOP 40
+- maximum exposure 33 ms for stable frame delivery
 - JPEG, video1, motion detect, records, and crond disabled by default
 
 These are first-boot defaults, scoped to the C120 board overlay. Installing or
-updating the recovery plugin does not alter video settings. The 60 fps setting
-is a requested encoder rate; the checked-in sensor mode advertises a maximum
-of 30 fps, and exposure can reduce the measured sensor rate further.
+updating the recovery plugin does not alter video settings. Existing cameras
+retain their settings on upgrade, so also set the resolution/rate explicitly
+when migrating them to QHD. The sensor mode advertises 30 fps, but the verified
+QHD output target is 20 fps. The exposure cap can reduce low-light brightness;
+raising it may reduce the actual frame rate.
+
+The board selects `c120-qhd`, a small shared library loaded only by Majestic
+through `/etc/default/majestic`. It sets the main scaler queue to two before
+SCL-to-VENC binding and prevents subsequent increases. This avoids the encoder
+allocation failure in the camera's 32 MiB media heap without changing bootargs,
+adding a resident process, or disabling audio. It is specific to the Infinity6C
+MI_SYS ABI: do not install it on other SoCs. Remove `/etc/default/majestic` to
+disable the hook after restoring a lower-resolution configuration.
+
+At QHD, leave `motionDetect.visualize` disabled: full-resolution motion boxes
+use extra media memory. Motion detection and JPEG can remain enabled, as tested
+on the second camera, although the lean first-boot defaults leave both off.
 
 The SC430AI IQ/config blob used by the working cameras is included at:
 
@@ -64,6 +79,7 @@ Use the OpenIPC Infinity6C musl toolchain on Linux:
 ```sh
 CC=/path/to/sdk/bin/arm-openipc-linux-musleabihf-gcc sh contrib/tapo-c120/build-plugin.sh
 python3 contrib/tapo-c120/test_runtime.py
+python3 contrib/tapo-c120/test_qhd.py
 ```
 
 The helper is statically linked so both existing C120 firmware versions can run
@@ -85,3 +101,34 @@ encoder as 2064x1168; the other remained 2432x1376. No encoder configuration was
 changed during this update. Both cameras passed an AP/setup-page/station-mode
 cycle without rebooting. A physical button press and a long-duration stream
 soak remain separate hardware checks.
+
+## QHD And Upstream Update, 2026-10-04
+
+Both live cameras now have persistent QHD/20fps settings and the QHD library.
+Their previous configurations and replaced files are backed up locally and in
+`/root/c120-qhd-backups/` on each camera. No kernel, bootloader, bootargs, Wi-Fi
+credentials or root password were changed, and neither device was rebooted.
+
+| Camera suffix | Resolution | Frames in 60 s | Preserved bitrate |
+| --- | --- | --- | --- |
+| .126 | 2560x1440 | 1199 | 10000 kbps |
+| .196 | 2560x1440 | 1200 | 6000 kbps |
+
+Both passed a normal Majestic restart and a software-triggered AP/setup-page/
+station cycle, followed by another RTSP check. Opus audio remained working.
+The H.264 header still advertises 30 fps; counted frames over stream timestamps
+confirm the actual rate is approximately 20 fps. Physical button testing,
+power-cycle testing and a multi-hour stream soak are not covered by these checks.
+
+Upstream was reviewed through `a71fc5dd55b032eced1d882549b29c48fbd781c2`.
+Selected backports:
+
+- [Majestic startup signal handling](https://github.com/OpenIPC/firmware/commit/6289cd4f), executable-based process matching and timezone refresh.
+- [Explicit Majestic zlib dependency](https://github.com/OpenIPC/firmware/commit/67bb2f82), already present in C120 images but now enforced by the package.
+- [Unused musl library pruning](https://github.com/OpenIPC/firmware/commit/53e8bf25) and [BusyBox-only module-index pruning](https://github.com/OpenIPC/firmware/commit/e56affbc), retaining referenced libraries and kmod indexes. These reduce flash usage, not idle RAM by themselves.
+- [Pinned OpenIPC libevent fork](https://github.com/OpenIPC/firmware/commit/9e7cf5b2), replacing the rebased pull-request ref that broke clean builds. Its source includes our musl mmap and WebSocket error-cleanup fixes, so the duplicate patches were removed. Monolithic libevent cleanup now handles changing patch versions.
+
+The QHD package and compatible Web UI passed real ARM Buildroot builds. Host
+checks cover the ioctl ABI/order/guards, installation, defaults, service lifecycle
+and pruning retention rules. A complete rebuilt firmware image has not yet been
+flashed; live updates were made to the existing working firmware.

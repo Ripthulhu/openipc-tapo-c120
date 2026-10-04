@@ -48,6 +48,15 @@ if grep -q '^BR2_OPENIPC_SNS_MODEL="sc430ai"' "$CONFIG"; then
 	fi
 fi
 
+if grep -q '^BR2_PACKAGE_C120_QHD=y' "$CONFIG"; then
+	for file in usr/lib/libc120-qhd.so etc/default/majestic; do
+		if [ ! -s "$TARGET_DIR/$file" ]; then
+			echo "MISSING: C120 QHD support file $file" >&2
+			fail=1
+		fi
+	done
+fi
+
 if [ "$fail" -ne 0 ]; then
 	echo "check_target_modules: regression detected" >&2
 	exit 1

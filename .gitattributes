@@ -4,3 +4,7 @@ contrib/tapo-c120/ap-recovery-plugin/files/usr/bin/c120-eventd -text
 contrib/tapo-c120/runtime-overlay/usr/bin/c120-eventd -text
 br-ext-chip-sigmastar/board/tapo-c120/overlay/usr/share/openipc/customizer.sh text eol=lf
 .github/scripts/check_target_modules.sh text eol=lf
+.github/scripts/build_firmware.sh text eol=lf
+general/package/c120-qhd/** text eol=lf
+general/package/majestic/files/S95majestic text eol=lf
+general/scripts/rootfs_script.sh text eol=lf

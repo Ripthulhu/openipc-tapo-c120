@@ -251,44 +251,7 @@ jobs:
           restore-keys: dl-
 
       - name: Build firmware
-        run: |
-          export GIT_HASH=$(git rev-parse --short ${GITHUB_SHA})
-          export GIT_BRANCH=${GITHUB_REF_NAME}
-          echo GIT_HASH=${GIT_HASH} >> ${GITHUB_ENV}
-          echo GIT_BRANCH=${GIT_BRANCH} >> ${GITHUB_ENV}
-
-          mkdir -p /tmp/ccache
-          ln -s /tmp/ccache ${HOME}/.ccache
-
-          # Backoffs give 7 attempts total. The longer tail (600, 1200) covers
-          # the GitHub releases CDN / toolchain mirror flakes that took down
-          # hi3516av100_ultimate on 2026-05-20 (run 26196546684) — 502s
-          # storming for >10 min outlasted the previous 30/60/120/300 budget.
-          backoffs="30 60 120 300 600 1200"
-          attempt=1
-          for sleep_for in $backoffs ""; do
-            make BOARD=${{matrix.platform}} && break
-            if [ -z "$sleep_for" ]; then
-              echo "::error::build failed after ${attempt} attempts"
-              exit 1
-            fi
-            echo "::warning::attempt ${attempt} failed, retrying after ${sleep_for}s"
-            sleep "$sleep_for"
-            attempt=$((attempt + 1))
-          done
-
-          TIME=$(date -d @${SECONDS} +%M:%S)
-          echo TIME=${TIME} >> ${GITHUB_ENV}
-
-          NORFW=$(find output/images -name openipc*nor*)
-          if [ -e ${NORFW} ]; then
-            echo NORFW=${NORFW} >> ${GITHUB_ENV}
-          fi
-
-          NANDFW=$(find output/images -name openipc*nand*)
-          if [ -e ${NANDFW} ]; then
-            echo NANDFW=${NANDFW} >> ${GITHUB_ENV}
-          fi
+        run: bash .github/scripts/build_firmware.sh "${{matrix.platform}}"
 
       - name: Verify kernel modules
         run: sh .github/scripts/check_target_modules.sh

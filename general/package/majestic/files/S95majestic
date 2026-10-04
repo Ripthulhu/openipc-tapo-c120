@@ -1,28 +1,47 @@
 #!/bin/sh
 
+if [ -r /etc/TZ ]; then
+	TZ=$(cat /etc/TZ)
+	export TZ
+fi
 DAEMON="majestic"
-PIDFILE="/var/run/$DAEMON.pid"
+DAEMON_PATH="/usr/bin/$DAEMON"
 DAEMON_ARGS="-s"
 
+running() {
+	start-stop-daemon -t -K -q -x "$DAEMON_PATH"
+}
+
 start() {
-	echo -n "Starting $DAEMON: "
-	start-stop-daemon -b -m -S -q -p "$PIDFILE" -x "$DAEMON" -- $DAEMON_ARGS
-	if [ $? -eq 0 ]; then
-		echo "OK"
-	else
-		echo "FAIL"
-	fi
+	printf 'Starting %s: ' "$DAEMON"
+	(
+		# Survive an SSH disconnect during daemon startup.
+		trap '' HUP
+		[ ! -r /etc/default/majestic ] || . /etc/default/majestic
+		start-stop-daemon -b -S -q -x "$DAEMON_PATH" -a "$DAEMON" -- $DAEMON_ARGS
+	)
+	case $? in
+		0) echo "OK" ;;
+		1) echo "OK (already running)" ;;
+		*) echo "FAIL"; return 1 ;;
+	esac
 }
 
 stop() {
-	echo -n "Stopping $DAEMON: "
-	start-stop-daemon -K -q -p "$PIDFILE"
-	if [ $? -eq 0 ]; then
-		rm -f "$PIDFILE"
-		echo "OK"
-	else
+	printf 'Stopping %s: ' "$DAEMON"
+	# Match the executable, not a stale or recycled PID file.
+	start-stop-daemon -K -q -x "$DAEMON_PATH"
+	i=0
+	while running && [ "$i" -lt 10 ]; do
+		i=$((i + 1))
+		sleep 1
+	done
+	if running; then
 		echo "FAIL"
+		return 1
 	fi
+	rm -f "/var/run/$DAEMON.pid"
+	echo "OK"
 }
 
 case "$1" in
@@ -31,13 +50,13 @@ case "$1" in
 		;;
 
 	restart)
-		stop
+		stop || exit 1
 		sleep 3
 		start
 		;;
 
 	reload)
-		killall -1 "$DAEMON"
+		start-stop-daemon -K -s 1 -q -x "$DAEMON_PATH"
 		;;
 
 	*)
