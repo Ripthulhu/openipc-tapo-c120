@@ -18,7 +18,7 @@ The board profile sets:
 - RTL8188FU USB Wi-Fi power enable on GPIO42
 - IR-cut GPIO81 with inverted single-coil polarity
 - camera light leader GPIO12
-- 2560x1440 H.264 at 20 fps, 10000 kbps CBR, GOP 40
+- 2560x1440 H.264 at 20 fps, 10000 kbps CBR, GOP 2 seconds (40 frames)
 - maximum exposure 33 ms for stable frame delivery
 - JPEG, video1, motion detect, records, and crond disabled by default
 
@@ -29,13 +29,11 @@ when migrating them to QHD. The sensor mode advertises 30 fps, but the verified
 QHD output target is 20 fps. The exposure cap can reduce low-light brightness;
 raising it may reduce the actual frame rate.
 
-The board selects `c120-qhd`, a small shared library loaded only by Majestic
-through `/etc/default/majestic`. It sets the main scaler queue to two before
-SCL-to-VENC binding and prevents subsequent increases. This avoids the encoder
-allocation failure in the camera's 32 MiB media heap without changing bootargs,
-adding a resident process, or disabling audio. It is specific to the Infinity6C
-MI_SYS ABI: do not install it on other SoCs. Remove `/etc/default/majestic` to
-disable the hook after restoring a lower-resolution configuration.
+The current upstream Majestic handles QHD natively through its Ring SCL-to-VENC
+binding. The old `c120-qhd` package and preload hook have been removed. On an
+existing camera, remove the old `/etc/default/majestic` and
+`/usr/lib/libc120-qhd.so` only when upgrading to the tested new streamer and
+supporting libraries. Do not remove the hook while keeping the older streamer.
 
 At QHD, leave `motionDetect.visualize` disabled: full-resolution motion boxes
 use extra media memory. Motion detection and JPEG can remain enabled, as tested
@@ -64,7 +62,20 @@ present. Other Infinity6C sensor profiles retain their existing behavior.
 - `c120-lamps` for off, white, 850 nm, 940 nm, and both-IR modes
 - `c120-light-pins.cgi` for configuring multiple camera-light GPIO pins
 - `c120-eventd` merged reset-button and light-pin mirror daemon
-- C120 preview page additions
+- `c120-lights.cgi`, using the current Web UI's controls and navigation
+
+Install the AP recovery plugin with its own `install.sh` first. Then install the
+light controls from this directory:
+
+```sh
+sh contrib/tapo-c120/install-runtime.sh
+```
+
+The light installer requires the current OpenIPC Web UI and an inactive setup
+AP. It preserves the light-pin configuration and backs up the navigation file.
+Open **Camera > C120 Lights** for the five lamp modes and multi-pin settings.
+Re-run this installer after a standalone upstream Web UI update to restore the
+menu entry. It does not replace upstream's live/preview page.
 
 `c120-eventd.c` builds the native helper shipped in both payloads. It replaces
 the shell polling loop, enforces a single running instance, validates settings,
@@ -95,40 +106,73 @@ showed about 4.8% of one CPU core for the old shell plus its children versus
 about 0.1% for the native helper. Resolution, requested FPS, bitrate, JPEG and
 motion settings were preserved.
 
-Five-second RTSP checks decoded H.264 and Opus from both cameras at roughly
-30 video frames per second. One requested size, 2067x1170, was reported by the
-encoder as 2064x1168; the other remained 2432x1376. No encoder configuration was
-changed during this update. Both cameras passed an AP/setup-page/station-mode
-cycle without rebooting. A physical button press and a long-duration stream
-soak remain separate hardware checks.
-
 ## QHD And Upstream Update, 2026-10-04
 
-Both live cameras now have persistent QHD/20fps settings and the QHD library.
-Their previous configurations and replaced files are backed up locally and in
-`/root/c120-qhd-backups/` on each camera. No kernel, bootloader, bootargs, Wi-Fi
-credentials or root password were changed, and neither device was rebooted.
+The complete OpenIPC firmware tree was merged through upstream
+`a71fc5dd55b032eced1d882549b29c48fbd781c2`, rather than selectively backported.
+The latest rolling Majestic and Web UI were fetched on 2026-10-04. Supporting
+packages include Mbed TLS 3.6.4, curl 8.15.0, and OpenIPC libevent at
+`694decef35717d8955aa34ba4d2baaaf61c9e4a9`.
+
+Both live cameras received the new Majestic, Web UI, libraries, CLI, updater,
+clock helpers, and compatible C120 light plugin. The old QHD hook is no longer
+installed or loaded. Wi-Fi credentials, root passwords, bitrates, kernel,
+bootloader, partition layout, and media-heap settings were preserved. Existing
+JPEG/motion settings were retained; full-resolution motion visualization remains
+off. GOP is now 2 seconds, not 40 seconds.
+
+Backups of replaced software and configuration are stored privately on the
+deployment PC, including a verified pre-update archive for each camera. Do not
+commit these archives: they contain private configuration. Streamed staging on
+persistent storage avoids decompressing large archives into these cameras'
+small RAM-backed `/tmp`.
 
 | Camera suffix | Resolution | Frames in 60 s | Preserved bitrate |
 | --- | --- | --- | --- |
 | .126 | 2560x1440 | 1199 | 10000 kbps |
-| .196 | 2560x1440 | 1200 | 6000 kbps |
+| .196 | 2560x1440 | 1199 | 6000 kbps |
 
 Both passed a normal Majestic restart and a software-triggered AP/setup-page/
-station cycle, followed by another RTSP check. Opus audio remained working.
+station cycle. Opus audio remained working. The new light page was checked in
+a browser at desktop and 390-pixel mobile widths without horizontal overflow.
+Both also passed a software reboot: subsequent 15-second checks counted 299
+and 298 QHD frames respectively, with working audio, the new binary, no old
+hook, and the native recovery helper running. The clock restored correctly.
 The H.264 header still advertises 30 fps; counted frames over stream timestamps
-confirm the actual rate is approximately 20 fps. Physical button testing,
-power-cycle testing and a multi-hour stream soak are not covered by these checks.
+confirm the actual rate is approximately 20 fps. Physical button testing and a
+multi-hour stream soak remain separate checks.
 
-Upstream was reviewed through `a71fc5dd55b032eced1d882549b29c48fbd781c2`.
-Selected backports:
+## Prepared Full Image
 
-- [Majestic startup signal handling](https://github.com/OpenIPC/firmware/commit/6289cd4f), executable-based process matching and timezone refresh.
-- [Explicit Majestic zlib dependency](https://github.com/OpenIPC/firmware/commit/67bb2f82), already present in C120 images but now enforced by the package.
-- [Unused musl library pruning](https://github.com/OpenIPC/firmware/commit/53e8bf25) and [BusyBox-only module-index pruning](https://github.com/OpenIPC/firmware/commit/e56affbc), retaining referenced libraries and kmod indexes. These reduce flash usage, not idle RAM by themselves.
-- [Pinned OpenIPC libevent fork](https://github.com/OpenIPC/firmware/commit/9e7cf5b2), replacing the rebased pull-request ref that broke clean builds. Its source includes our musl mmap and WebSocket error-cleanup fixes, so the duplicate patches were removed. Monolithic libevent cleanup now handles changing patch versions.
+The complete latest firmware built successfully from `84d98762`. C120-specific
+256 KiB SquashFS blocks and XZ ARM/ARM-Thumb compression let it fit the existing
+partitions without removing the Web UI or changing image quality:
 
-The QHD package and compatible Web UI passed real ARM Buildroot builds. Host
-checks cover the ioctl ABI/order/guards, installation, defaults, service lifecycle
-and pruning retention rules. A complete rebuilt firmware image has not yet been
-flashed; live updates were made to the existing working firmware.
+| Image | Bytes | Partition limit |
+| --- | --- | --- |
+| `uImage.ssc377` | 2039272 | 2097152 |
+| `rootfs.squashfs.ssc377` | 5140480 | 5242880 |
+
+The image identifies itself as `ssc377_lite_tp-link-tapo-c120-v1`, not generic
+SSC377 lite. Do not substitute a generic SSC377 image: it lacks the C120 sensor,
+Wi-Fi power, and GPIO defaults. Recovery/light controls remain installable extras,
+not files baked into the base image.
+
+SHA256:
+
+```text
+711cfac32f177f6c7afac8c12f457be628b473539a2c79becb14f1b27d51382b  uImage.ssc377
+18cf14b012bf72c7dd17a9e1ee7a750fa144d8623b2fb8ebd7a115bfaacfc318  rootfs.squashfs.ssc377
+fb6b203fde1fee82a2e13020abc82324680f568f972bb2ef0fe087ed0b8abf59  openipc.ssc377-nor-lite.tgz
+663debf35b66ccf5d3e8c5a36d2b9d00c1cafce9d07c1dbb02216cb01bf71447  usr/bin/majestic
+```
+
+This image has **not** been flashed or boot-tested. The owner selected a
+software-only update now and preparation for a later full flash with UART
+recovery available. The existing firmware version shown in the Web UI is
+therefore intentionally unchanged; `/etc/c120-software-version` records the
+software-only update separately. Fresh installation retains the upstream
+password-claim and Majestic EULA flow for the human owner.
+
+The full ARM build, native helper/form tests, QHD defaults/startup/pruning tests,
+CI selector self-test, workflow syntax checks, and upstream shell tests passed.

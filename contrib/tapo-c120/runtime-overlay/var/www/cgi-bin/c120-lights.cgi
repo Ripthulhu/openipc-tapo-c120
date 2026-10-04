@@ -3,9 +3,9 @@
 <% page_title="C120 Lights" %>
 <%in p/header.cgi %>
 
-<fieldset class="mb-4" id="c120-lights" disabled>
+<fieldset class="border-0 p-0 mb-4" id="c120-lights" disabled>
 	<legend class="h5">Camera light</legend>
-	<div class="d-flex flex-wrap gap-2" role="group" aria-label="Camera light">
+	<div class="mj-seg flex-wrap" role="group" aria-label="Camera light">
 		<% for mode in off 850 940 both white; do
 			case "$mode" in
 				off) label="Off" ;;
@@ -14,12 +14,12 @@
 				both) label="850 + 940 nm" ;;
 				white) label="White" ;;
 			esac %>
-		<input type="radio" class="btn-check" name="c120-light" id="c120-<%= $mode %>" value="<%= $mode %>" autocomplete="off">
-		<label class="btn btn-outline-primary" for="c120-<%= $mode %>"><%= $label %></label>
+		<input type="radio" class="mj-seg-in" name="c120-light" id="c120-<%= $mode %>" value="<%= $mode %>" autocomplete="off">
+		<label class="mj-seg-lbl" for="c120-<%= $mode %>"><%= $label %></label>
 		<% done %>
 	</div>
 </fieldset>
-<p id="c120-light-status" class="text-secondary" role="status">Reading light state...</p>
+<p id="c120-light-status" class="text-body-secondary" role="status">Reading light state...</p>
 <p id="c120-light-error" class="text-danger" role="alert" hidden></p>
 <p><a href="c120-light-pins.cgi">Camera light GPIO pins</a></p>
 <p><a href="camera.cgi?tab=nightMode">Day / Night settings</a></p>

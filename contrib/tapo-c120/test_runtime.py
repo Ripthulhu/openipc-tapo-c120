@@ -230,6 +230,7 @@ cli() {{ :; }}
     for mode in ("off", "850", "940", "both", "white"):
         assert f'id="c120-{mode}"' in output
     assert "850 + 940 nm" in output and 'role="alert"' in output
+    assert 'class="mj-seg-in"' in output and 'class="mj-seg-lbl"' in output
     assert "get_metrics" not in page and "get_night" not in page
     assert not (BASE / "runtime-overlay/var/www/cgi-bin/preview.cgi").exists()
     print("PASS forms: real Haserl decoding, Wi-Fi saves, GPIO settings and validation")
