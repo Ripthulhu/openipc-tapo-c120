@@ -18,6 +18,7 @@ The board profile sets:
 - RTL8188FU USB Wi-Fi power enable on GPIO42
 - IR-cut GPIO81 with inverted single-coil polarity
 - camera light leader GPIO12
+- native automatic day/night: 16x gain for night, 2x for day, 15/60-second delays
 - 2560x1440 H.264 at 20 fps, 10000 kbps CBR, GOP 2 seconds (40 frames)
 - maximum exposure 33 ms for stable frame delivery
 - JPEG, video1, motion detect, records, and crond disabled by default
@@ -200,6 +201,62 @@ presses and a multi-hour stream soak remain unverified in this rollout.
 Never substitute a generic SSC377 image or use validation-bypass flags for
 these upgrades. Preserve the settings partition unless deliberately doing a
 fresh installation, which returns the camera to the human claim/EULA flow.
+
+## Automatic Day/Night And Settings Audit
+
+The post-flash audit on 2026-10-04 found `lightMonitor` disabled on the first
+camera and enabled on the second. The default exposure-exhaustion trigger did
+not switch the first camera even with its lens covered: SigmaStar reported
+128x analog gain and zero scene luminance, but `isp_exposureismax` remained 0.
+The C120 profile therefore uses Majestic's native `autoNightGain: 16` override,
+not an extra polling daemon or legacy raw-gain thresholds. The observed
+uncovered daytime gains were below 10x. This is a tested starting point, not
+a claim that every installation has identical lighting.
+
+The source profile now enables the monitor, keeps both actuators in `auto`,
+and explicitly sets gain thresholds of 16x/2x and night/day delays of 15/60
+seconds. It retains the inverted single-pin IR-cut on GPIO81 and active-high
+lamp leader GPIO12. With the separately installed light plugin configured for
+`12 13`, both IR illuminators follow the automatic night state. No daylight
+sensor pin or legacy `minThreshold`/`maxThreshold` is configured.
+
+Both live cameras passed owner-assisted lens-cover/uncover tests. Metrics
+recorded one automatic night and one automatic day transition on each, source
+4, grayscale in night, GPIO81 changing 1 -> 0 -> 1, and GPIO12/GPIO13 changing
+0 -> 1 -> 0. Majestic's lamp-down check confirmed day; its anti-flapping penalty
+remained 1. These short tests do not replace a dawn/dusk or overnight soak.
+
+Live changes were limited to `nightMode.lightMonitor` and `autoNightGain`.
+Effective configuration comparisons confirmed that all other Majestic settings
+were preserved, including image orientation, audio rates, JPEG size, motion
+ROIs, resolution, requested frame rate and bitrate. Both Majestic processes
+remained running without rebuilding their media pipelines. Subsequent
+30-second RTSP checks counted 598/599 QHD H.264 frames and 1501/1500 Opus frames
+on the first/second cameras. Sensor selection, Wi-Fi power/driver, reset-button
+plugin, memory layout, and watchdog were already configured correctly.
+
+The first camera's clock was about 84 seconds fast with public NTP pools. It
+was switched to a verified local time server and then agreed with the PC to
+within the one-second clock-read precision; the second camera's working NTP
+settings and both timezones were preserved. The local server address is a
+deployment setting, not a firmware default. The known SDK/IQ minor-version
+warning remains; this audit did not substitute an untested sensor tuning blob.
+
+The verified image from `84d98762` above predates this source-default change;
+its hashes have not changed. Existing installations preserve their overlay and
+do not rerun the first-boot customizer. On the tested October Majestic, enable
+the same native policy without reflashing:
+
+```sh
+cli -s .nightMode.lightMonitor true
+cli -s .nightMode.autoNightGain 16
+```
+
+Leave the sensor-pin and legacy threshold fields empty, keep the IR-cut and
+camera light in automatic mode, and retain the 2x/15s/60s defaults. The current
+Web UI exposes these controls under **Settings > Day / Night**. See
+[upstream day/night documentation](https://github.com/OpenIPC/wiki/blob/master/en/majestic-streamer.md#auto-daynight-detection)
+for the native policy and supported tuning keys.
 
 The full ARM build, native helper/form tests, QHD defaults/startup/pruning tests,
 CI selector self-test, workflow syntax checks, and upstream shell tests passed.

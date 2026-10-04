@@ -14,10 +14,18 @@ cli -s .isp.antiFlicker disabled
 cli -s .isp.exposure 33
 
 cli -s .nightMode.colorToGray true
+cli -s .nightMode.irCut auto
 cli -s .nightMode.irCutPin1 81
 cli -s .nightMode.irCutSingleInvert true
+cli -s .nightMode.backlight auto
 cli -s .nightMode.backlightPin 12
-cli -s .nightMode.lightMonitor false
+cli -s .nightMode.backlightInvert false
+# Native gain switching: this SC430AI driver never reported AE spent with a covered lens at 128x.
+cli -s .nightMode.lightMonitor true
+cli -s .nightMode.autoNightGain 16
+cli -s .nightMode.autoDayGain 2
+cli -s .nightMode.autoNightDelay 15
+cli -s .nightMode.autoDayDelay 60
 cli -s .nightMode.lightSensorInvert false
 cli -s .nightMode.monitorDelay 0
 
