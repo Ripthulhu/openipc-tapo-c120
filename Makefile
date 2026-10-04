@@ -36,6 +36,8 @@ CONFIG := $(shell find br-ext-*/configs -name '$(BOARD)_defconfig' -print -quit)
 include $(CONFIG)
 endif
 
+export BUILD_PLATFORM ?= $(BOARD)
+
 ifneq ($(filter repack,$(MAKECMDGOALS)),)
 -include $(BR_CONF)
 endif
