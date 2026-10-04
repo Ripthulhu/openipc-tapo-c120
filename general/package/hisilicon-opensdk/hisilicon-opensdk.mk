@@ -5,7 +5,7 @@
 ################################################################################
 
 HISILICON_OPENSDK_SITE = $(call github,openipc,openhisilicon,$(HISILICON_OPENSDK_VERSION))
-HISILICON_OPENSDK_VERSION = b1c4dae5
+HISILICON_OPENSDK_VERSION = 2a38a27ba4764d4e2265a6f1753ecca0ef8a773f
 
 HISILICON_OPENSDK_LICENSE = GPL-3.0
 HISILICON_OPENSDK_LICENSE_FILES = LICENSE
@@ -34,6 +34,12 @@ HISILICON_OPENSDK_DEPENDENCIES += hisilicon-osdrv-hi3520dv200
 endif
 ifeq ($(BR2_PACKAGE_HISILICON_OSDRV_HI3516CV6XX),y)
 HISILICON_OPENSDK_DEPENDENCIES += hisilicon-osdrv-hi3516cv6xx
+endif
+ifeq ($(BR2_PACKAGE_HISILICON_OSDRV_HI3519DV500),y)
+HISILICON_OPENSDK_DEPENDENCIES += hisilicon-osdrv-hi3519dv500
+endif
+ifeq ($(BR2_PACKAGE_GOKE_OSDRV_GK7205V500),y)
+HISILICON_OPENSDK_DEPENDENCIES += goke-osdrv-gk7205v500
 endif
 
 HISILICON_OPENSDK_MODULE_SUBDIRS = kernel
@@ -65,6 +71,17 @@ ifeq ($(OPENIPC_SOC_FAMILY),hi3516cv6xx)
 HISILICON_OPENSDK_MODULE_MAKE_OPTS += DISABLE_VO=1 DISABLE_TDE=1
 endif
 
+# XMedia (gk7205v500 family): the SDK ships two prebuilt module sets that are
+# not interchangeable. GK7201V200 is a V200-class die (chip id 0x72010200);
+# the V500 set gets it as far as the ISP and no further (#2464).
+ifeq ($(OPENIPC_SOC_FAMILY),gk7205v500)
+ifeq ($(OPENIPC_SOC_MODEL),gk7201v200)
+HISILICON_OPENSDK_MODULE_MAKE_OPTS += XM_SET=V200
+else
+HISILICON_OPENSDK_MODULE_MAKE_OPTS += XM_SET=V500
+endif
+endif
+
 ifeq ($(OPENIPC_SOC_FAMILY),hi3516ev200)
 	HISILICON_OPENSDK_SDK_CODE = 0x3516E200
 else ifeq ($(OPENIPC_SOC_FAMILY),gk7205v200)
@@ -73,6 +90,8 @@ else ifeq ($(OPENIPC_SOC_FAMILY),hi3516cv500)
 	HISILICON_OPENSDK_SDK_CODE = 0x3516C500
 else ifeq ($(OPENIPC_SOC_FAMILY),hi3516cv6xx)
 	HISILICON_OPENSDK_SDK_CODE = 0x3516C610
+else ifeq ($(OPENIPC_SOC_FAMILY),hi3519dv500)
+	HISILICON_OPENSDK_SDK_CODE = 0x3519D500
 endif
 
 # for userspace libraries
@@ -229,7 +248,22 @@ HISILICON_OPENSDK_SENSORS_hi3516cv6xx = \
 	smart_sc4336p/libsns_sc4336p \
 	smart_sc450ai/libsns_sc450ai \
 	smart_sc500ai/libsns_sc500ai
+HISILICON_OPENSDK_SENSORS_hi3519dv500 = \
+	gst_412c/libsns_gst412c \
+	omnivision_os04a10/libsns_os04a10 \
+	omnivision_os04a10_slave/libsns_os04a10_slave \
+	omnivision_os08a20/libsns_os08a20 \
+	smart_sc450ai/libsns_sc450ai \
+	smart_sc850sl/libsns_sc850sl \
+	sony_imx347_slave/libsns_imx347_slave \
+	sony_imx515/libsns_imx515
 
+# gk7205v500 builds the V4 drivers (sensor/hi3516ev200) against the XMedia
+# API. Only the sensors GK7201V200 boards carry are installed: the lite
+# rootfs has no room for all thirty. sc2336 still comes from the osdrv.
+HISILICON_OPENSDK_SENSORS_gk7205v500 = \
+	imagedesign_mis2008/libsns_mis2008 \
+	smart_sc223a/libsns_sc223a
 HISILICON_OPENSDK_SENSORS = $(HISILICON_OPENSDK_SENSORS_$(OPENIPC_SOC_FAMILY))
 
 # fpv variant on V4 (hi3516ev200 + gk7205v200): restrict to the high-fps
@@ -500,12 +534,54 @@ define HISILICON_OPENSDK_INSTALL_TARGET_CMDS
 	done
 endef
 
+# For gk7205v500 (XMedia): same scheme as gk7205v200, under the xm_*.ko names
+# load_goke insmods/modprobes -- the set goke-osdrv-gk7205v500 installs when
+# opensdk is off. The sensors are the V4 ones from sensor/hi3516ev200.
+else ifeq ($(OPENIPC_SOC_FAMILY),gk7205v500)
+HISILICON_OPENSDK_KMOD_DST = $(TARGET_DIR)/lib/modules/$(HISILICON_OPENSDK_KVER)/goke
+HISILICON_OPENSDK_XM_MODS = acodec adec aenc ai aio ao base chnl h264e h265e \
+	isp isp_sensor_i2c isp_sensor_spi ive jpege mipi_rx osal rc rgn sys \
+	sysconfig vedu venc vgs vi vpss wdt
+define HISILICON_OPENSDK_INSTALL_TARGET_CMDS
+	$(INSTALL) -m 755 -d $(TARGET_DIR)/usr/lib/sensors
+	$(foreach s,$(HISILICON_OPENSDK_SENSORS), \
+		$(INSTALL) -D -m 0644 $(@D)/libraries/sensor/hi3516ev200/$(s).so $(TARGET_DIR)/usr/lib/sensors ; \
+	)
+	$(INSTALL) -m 755 -d $(HISILICON_OPENSDK_KMOD_DST)
+	for mod in $(HISILICON_OPENSDK_XM_MODS); do \
+		$(INSTALL) -m 644 $(@D)/kernel/open_$${mod}.ko \
+			$(HISILICON_OPENSDK_KMOD_DST)/xm_$${mod}.ko || exit 1; \
+	done
+endef
+
 # For hi3516cv6xx: V5 — install opensdk .ko directly to hisilicon/ keeping
 # the open_* names. load_hisilicon (rewritten) drives `modprobe open_*`.
 # Sensor .so files built from source under libraries/sensor/hi3516cv6xx/
 # get installed to /usr/lib/sensors/, overwriting any prebuilt vendor
 # copies that hisilicon-osdrv-hi3516cv6xx may also have installed.
+# The .ko are installed unstripped: Buildroot's target-finalize skips *.ko on
+# purpose, and nothing here strips them either, so every module ships its
+# .symtab, .strtab and a .comment for each object file. --strip-unneeded keeps
+# every symbol a relocation or __ksymtab needs (INSTALL_MOD_STRIP=1 in the
+# kernel is the same operation); the rest is dead weight on a NOR part.
 else ifeq ($(OPENIPC_SOC_FAMILY),hi3516cv6xx)
+HISILICON_OPENSDK_KMOD_DST = $(HISILICON_OPENSDK_KMOD_BASE)
+define HISILICON_OPENSDK_INSTALL_TARGET_CMDS
+	$(INSTALL) -m 755 -d $(HISILICON_OPENSDK_KMOD_DST)
+	for ko in $(@D)/kernel/open_*.ko; do \
+		[ -f $${ko} ] || continue; \
+		$(TARGET_STRIP) --strip-unneeded --remove-section=.comment --remove-section=.note $${ko}; \
+		$(INSTALL) -m 644 -t $(HISILICON_OPENSDK_KMOD_DST) $${ko}; \
+	done
+	$(INSTALL) -m 755 -d $(TARGET_DIR)/usr/lib/sensors
+	$(foreach s,$(HISILICON_OPENSDK_SENSORS), \
+		$(INSTALL) -D -m 0644 $(@D)/libraries/sensor/$(OPENIPC_SOC_FAMILY)/$(s).so $(TARGET_DIR)/usr/lib/sensors ; \
+	)
+endef
+
+# hi3519dv500: V5 aarch64 — same as cv6xx, install open_*.ko verbatim
+# (load_hisilicon drives `modprobe open_*`) + the source-built sensor .so.
+else ifeq ($(OPENIPC_SOC_FAMILY),hi3519dv500)
 HISILICON_OPENSDK_KMOD_DST = $(HISILICON_OPENSDK_KMOD_BASE)
 define HISILICON_OPENSDK_INSTALL_TARGET_CMDS
 	$(INSTALL) -m 755 -d $(HISILICON_OPENSDK_KMOD_DST)
@@ -548,6 +624,34 @@ endif
 
 $(eval $(kernel-module))
 
+# The cv500 neo variant ships every vendor module TWICE, and the wipe in the
+# hook below does not catch it. That board's kernel is the 7.x
+# `upstream-patches` tree, where buildroot's kernel-module install lands the
+# .ko in updates/ rather than the extra/ the wipe clears; INSTALL_TARGET_CMDS
+# then copies the same open_*.ko set into hisilicon/. kmod searches "updates"
+# ahead of everything else, so updates/ is the copy modprobe resolves and
+# depmod indexes, and the hisilicon/ set is bytes nothing can reach. On
+# hi3516av300_neo that is 45 modules and 5.4 MB of .ko -- ~1520KB of squashfs,
+# and what put the board 16KB over its 8192KB cap in the 2026-09-14 nightly
+# (run 34874636710). Verified against that run's own published image:
+# in openipc.hi3516av300-nor-neo.tgz the hisilicon/ names are a pure subset of
+# updates/, and modules.dep names updates/ 156 times and hisilicon/ never.
+#
+# Scoped to cv500+neo deliberately, because the same duplication has the
+# opposite answer elsewhere. The 4.9 boards of every family below put the
+# kernel-module copies in extra/, have no updates/ directory at all, and so
+# hisilicon/ is their only -- live -- copy. The cv300 neo board does have both
+# directories, but its install block RENAMES the modules to hi3516cv300_*/hi_*
+# in hisilicon/, names that appear nowhere in updates/ and that its
+# load_hisilicon insmods by filename, so there hisilicon/ is the live set and
+# updates/ is the dead one. The other neo boards are tracked in issue #2420
+# rather than swept up here.
+ifeq ($(OPENIPC_SOC_FAMILY),hi3516cv500)
+ifeq ($(OPENIPC_VARIANT),neo)
+HISILICON_OPENSDK_DEDUP_CV500_NEO = rm -rf $(TARGET_DIR)/lib/modules/*/hisilicon
+endif
+endif
+
 # Run as a target-finalize hook so it operates on the *merged* $(TARGET_DIR),
 # which is the authoritative tree in both per-package and non-per-package modes.
 #
@@ -567,10 +671,26 @@ $(eval $(kernel-module))
 #    TARGET_FINALIZE_HOOKS (linux package is processed before this one), so
 #    it has already executed by the time we get here — we need a second pass
 #    so modules.dep reflects the post-cleanup state.
-ifneq ($(filter hi3516cv500 hi3516cv200 hi3516cv100 hi3516av100 hi3519v101 hi3516cv300 hi3520dv200 hi3516cv6xx,$(OPENIPC_SOC_FAMILY)),)
+# hi3516cv6xx_lite has a 5120 KB rootfs slot in the cv610 u-boot's partition
+# table and the V5 module set is a third of it. Eight of the 42 modules are
+# never loaded on this family: load_hisilicon has no modprobe for adc, aiisp,
+# devstat, spi_dma_transfer, user, user_proc or uvc, and open_svac3e (the SVAC3
+# encoder) is only probed on the 20g/00s/00g dies, for a codec majestic has no
+# code for. 60 KB of squashfs together; ultimate keeps all of them.
+ifeq ($(OPENIPC_SOC_MODEL)/$(OPENIPC_VARIANT),hi3516cv6xx/lite)
+define HISILICON_OPENSDK_PRUNE_CV6XX_LITE
+	for m in adc aiisp devstat spi_dma_transfer user user_proc uvc svac3e; do \
+		rm -f $(TARGET_DIR)/lib/modules/*/hisilicon/open_$$m.ko; \
+	done
+endef
+endif
+
+ifneq ($(filter hi3516cv500 hi3516cv200 hi3516cv100 hi3516av100 hi3519v101 hi3516cv300 hi3520dv200 hi3516cv6xx hi3519dv500,$(OPENIPC_SOC_FAMILY)),)
 define HISILICON_OPENSDK_FINALIZE_MODULES
 	$(if $(BR2_PER_PACKAGE_DIRECTORIES),rsync -a $(PER_PACKAGE_DIR)/hisilicon-opensdk/target/lib/modules/ $(TARGET_DIR)/lib/modules/)
 	rm -rf $(TARGET_DIR)/lib/modules/*/extra/open_*.ko
+	$(HISILICON_OPENSDK_DEDUP_CV500_NEO)
+	$(HISILICON_OPENSDK_PRUNE_CV6XX_LITE)
 	$(LINUX_RUN_DEPMOD)
 endef
 HISILICON_OPENSDK_TARGET_FINALIZE_HOOKS += HISILICON_OPENSDK_FINALIZE_MODULES
@@ -595,6 +715,17 @@ define HISILICON_OPENSDK_FINALIZE_MODULES_GK7205V200
 	$(LINUX_RUN_DEPMOD)
 endef
 HISILICON_OPENSDK_TARGET_FINALIZE_HOOKS += HISILICON_OPENSDK_FINALIZE_MODULES_GK7205V200
+endif
+
+# For gk7205v500: every module is renamed into goke/, so none of the
+# source-named copies in extra/ is reachable; drop them all.
+ifeq ($(OPENIPC_SOC_FAMILY),gk7205v500)
+define HISILICON_OPENSDK_FINALIZE_MODULES_GK7205V500
+	$(if $(BR2_PER_PACKAGE_DIRECTORIES),rsync -a $(PER_PACKAGE_DIR)/hisilicon-opensdk/target/lib/modules/ $(TARGET_DIR)/lib/modules/)
+	rm -f $(TARGET_DIR)/lib/modules/*/extra/open_*.ko
+	$(LINUX_RUN_DEPMOD)
+endef
+HISILICON_OPENSDK_TARGET_FINALIZE_HOOKS += HISILICON_OPENSDK_FINALIZE_MODULES_GK7205V500
 endif
 
 # Modules built for V4 ev200 by openhisilicon's Kbuild but never insmod'd

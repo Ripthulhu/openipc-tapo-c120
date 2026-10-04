@@ -2,13 +2,23 @@ name: uboot
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
+  # Clones and runs three u-boot trees' build.sh, so it holds no id-token: a
+  # token that authorizes pushes to openipc.org must never be reachable from
+  # code this repository does not pin. The push is the report job below.
   toolchain:
     name: Uboot
     runs-on: ubuntu-latest
+    outputs:
+      built_at: ${{ steps.prepare.outputs.built_at }}
     steps:
       - name: Prepare
+        id: prepare
         run: |
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           sudo apt-get update
           sudo apt-get install gcc-arm-linux-gnueabi gcc-mipsel-linux-gnu u-boot-tools lzop gnutls-dev lzma-alone uuid-dev
 
@@ -30,10 +40,99 @@ jobs:
           cd u-boot-sigmastar
           bash build.sh
 
+      # softprops/action-gh-release@v2 cannot update the `latest` release: its
+      # updateRelease PATCH re-sends the release's stored target_commitish, which
+      # for `latest` is a frozen commit SHA that diverges from where the tag now
+      # points (build.yml force-moves the `latest` tag every nightly). GitHub
+      # rejects that reconciliation with 403 "Resource not accessible by
+      # integration" even with contents:write. Drive the upload with the gh CLI
+      # instead, the same way build.yml publishes to `latest`.
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(u-boot-*/output/*-nor.bin u-boot-*/output/*-nand.bin)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no u-boot binaries found to upload"; exit 1
+          fi
+          echo "Uploading ${#files[@]} file(s) to release 'latest':"
+          printf '  %s\n' "${files[@]}"
+
+          gh_retry() { # retry gh through transient 403/429/5xx with backoff
+            local n=0 max=5 delay=10
+            until "$@"; do
+              n=$((n + 1))
+              if [ "$n" -ge "$max" ]; then
+                echo "::error::gh failed after ${max} attempts: $*"; return 1
+              fi
+              echo "::warning::gh attempt ${n} failed, retrying in ${delay}s"
+              sleep "$delay"; delay=$((delay * 2))
+            done
+          }
+
+          gh release view latest >/dev/null 2>&1 || \
+            gh_retry gh release create latest --title latest --notes "U-Boot binaries (nor/nand)"
+          for f in "${files[@]}"; do
+            gh_retry gh release upload latest "$f" --clobber
+          done
+
+      # The binaries just uploaded, for the report job. Data only: the report
+      # job hashes them when GitHub has no digest yet, and runs nothing from
+      # here.
+      - name: Hand the binaries to the report job
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: latest
-          files: |
+          name: uboot-binaries
+          retention-days: 7
+          if-no-files-found: error
+          path: |
             u-boot-*/output/*-nor.bin
             u-boot-*/output/*-nand.bin
+
+  # openipc.org learns which u-boot binaries exist, and their digests, from
+  # this push rather than by listing the `latest` release (see build.yml's
+  # report job, and PUSH.md in OpenIPC/website). Sizes and digests are
+  # GitHub's, read back from `latest` after the upload; a binary GitHub has no
+  # digest for yet is hashed from the artifact. The id is unique per run.
+  #
+  # The only job with id-token, and it runs nothing but this repository's own
+  # push script at the dispatched commit.
+  report:
+    name: Report to openipc.org
+    needs: toolchain
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - name: Download the binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: uboot-binaries
+          path: ${{ runner.temp }}/uboot
+      - name: Push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILT_AT: ${{ needs.toolchain.outputs.built_at }}
+          BINARIES: ${{ runner.temp }}/uboot
+        run: |
+          set -euo pipefail
+          gh release view latest --json assets > release.json
+          # upload-artifact keeps the u-boot-*/output/ layout under the
+          # common root, so search for the files rather than assume a depth.
+          python3 .github/scripts/push_build.py \
+            --source uboot \
+            --build-id "uboot-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::7}" \
+            --release latest \
+            --sha "$GITHUB_SHA" \
+            --built-at "$BUILT_AT" \
+            --release-json release.json \
+            --assets "$BINARIES/**/*-nor.bin" \
+            --assets "$BINARIES/**/*-nand.bin"

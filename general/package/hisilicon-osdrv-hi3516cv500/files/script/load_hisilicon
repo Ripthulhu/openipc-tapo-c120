@@ -172,9 +172,33 @@ insert_ko() {
 
     # insert_gyro
     modprobe open_wdt
+
+    # Cipher engine -> /dev/cipher. majestic's native WebRTC takes AES-CTR for
+    # its SRTP transform from here: measured on this part, 86.4us of CPU per
+    # 1100-byte packet in software against 38.4 through the engine, because
+    # the driver sleeps on its completion interrupt and gives the CPU back
+    # while the block works. See docs/hisi/cipher-engine.md in majestic.
+    #
+    # The module has shipped in this image for as long as the opensdk install
+    # has globbed open_*.ko; nothing ever loaded it, so /dev/cipher did not
+    # exist and majestic silently stayed in software. Costs ~170 KB of module
+    # plus 8 KB of DMA descriptors (SYMC_NODE_SIZE * 2 per channel, 8
+    # channels).
+    #
+    # Last, and after open_osal: modprobe would otherwise pull osal in as a
+    # dependency at whatever point this ran, ahead of insert_osal's own
+    # arguments. Failure is not an error -- a kernel without the block simply
+    # has no module to find, and that must not abort sensor bring-up.
+    # `|| true` because this is the LAST statement of insert_ko, which is
+    # in turn the last statement of the script, so its status becomes the
+    # exit status S70vendor reports. Without it an image whose
+    # openhisilicon predates the module loads every driver correctly and
+    # still reports "Loading vendor modules..." as a failure.
+    modprobe open_cipher 2>/dev/null || true
 }
 
 remove_ko() {
+    rmmod -w open_cipher 2>/dev/null
     rmmod -w open_wdt
     # rmmod_gyro
     # rmmod -w open_user
@@ -370,6 +394,16 @@ fi
 # Sensor config
 # SENSOR=${SENSOR:=imx307}
 #
+# A failed probe used to be stored as sensor=unknown, and rcS exports the
+# stored value into SENSOR before this ever runs -- so an already-latched
+# camera arrives here with SENSOR=unknown, takes the "set manually" branch
+# below, and never probes again however the real fault is fixed. Treat it
+# as unset and drop it from the environment so this boot re-detects. #2428.
+if [ "$SENSOR" = "unknown" ]; then
+	SENSOR=
+	fw_setenv sensor
+fi
+
 if [ -n "$SENSOR" ]; then
     logger -s -p daemon.info -t hisilicon "Manualy set SENSOR as ${SENSOR}"
 else
@@ -383,7 +417,15 @@ else
         export SENSOR=${SENSOR_DETECT:=unknown}
         remove_detect
         logger -s -p daemon.info -t hisilicon "Get data from ipcinfo and set SENSOR as ${SENSOR}"
-        fw_setenv sensor $SENSOR && logger -s -p daemon.info -t hisilicon "Write detected ${SENSOR} to U-Boot ENV"
+        # Do not persist a failed detection. The fw_printenv branch above wins
+        # whenever `sensor` exists, so writing "unknown" here latches the camera
+        # into "SENSOR is not detected, aborting..." for good -- detection never
+        # runs again and nothing says why. Seen on a GK7202V500 in #2428.
+        # load_ingenic has always cleared the variable instead of storing the
+        # miss; this is the same behaviour, reached by not writing at all.
+        if [ "$SENSOR" != "unknown" ]; then
+        	fw_setenv sensor $SENSOR && logger -s -p daemon.info -t hisilicon "Write detected ${SENSOR} to U-Boot ENV"
+        fi
     fi
 fi
 

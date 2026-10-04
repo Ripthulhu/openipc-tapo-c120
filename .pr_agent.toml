@@ -1,0 +1,199 @@
+# Qodo code-review configuration.
+#
+# Review standards live in two companion files at the repo root:
+#   best_practices.md            - judgement-based rules, imported as Review Standards
+#   pr_compliance_checklist.yaml - binary hard gates
+#
+# Reference: https://docs.qodo.ai/install-and-configure/configuration-overview/configuration-file
+#
+# CAUTION - do not name the dynamic linker's library-injection environment
+# variable in this file, in any case, and not inside a longer word either.
+# PR-Agent parses this file with a hardened Dynaconf loader that rejects the
+# directives capable of executing code or reading arbitrary files, and that
+# variable's name ends in one of them. Matching is on the bare token, so the
+# full variable name trips it even though it is only prose in a guideline.
+#
+# The failure mode is silent in the worst way: the agent posts "failed to apply
+# 'local' repo settings / Forbidden directive", then reviews the PR with its
+# stock prompt - so every guideline below is ignored while the review still
+# looks normal. That is exactly what happened on #2268, which added this file.
+#
+# Write such rules in best_practices.md instead. It is plain markdown, is under
+# no such restriction, and already states this one in full in section 4.1.
+
+[github_app]
+pr_commands = [
+    "/agentic_describe",
+    "/agentic_review",
+]
+
+[review_agent]
+comments_location_policy = "both"
+
+# 1 = all severities inline, 2 = high+medium, 3 = high only.
+# 2 keeps blast-radius and provenance findings inline without burying the diff in nits.
+inline_comments_severity_threshold = 2
+
+issues_user_guidelines = """
+OpenIPC/firmware is a Buildroot tree that builds images for roughly 90 boards across 13
+SoC vendors. general/overlay/ and general/package/ are shared: one file there reaches
+every camera of a family. Those cameras are installed in places nobody can physically
+reach, there is no staged rollout, and a bad change is discovered only after sysupgrade
+has already written it to flash. Weight findings by blast radius, not by diff size - a
+two-line change to a shared defconfig outranks a hundred lines in a new leaf package.
+
+Prioritise, in order:
+
+1. Device-specific values written into generic configuration. general/overlay/ ships to
+   every camera, and the *-osdrv-*/files/script/load_<vendor> scripts serve a whole SoC
+   family. A sensor, I2C address, GPIO number, or resolution that is true only of the
+   contributor's bench must not become the default for everyone else. This breaks already
+   deployed cameras at upgrade time, which is the worst failure mode this project has.
+   "Additive, so it changes no existing board" is the right exemption for a load_<vendor>
+   sensor case arm and is not a licence for the shared overlay: etc/wireless/usb has
+   accumulated 46 arms keyed on retail model names while 18 builder devices override the
+   whole file, and those 46 are grandfathered, not precedent.
+   Question a devmem write in a shipped script. It used to be the only way to tell a
+   camera something is soldered to a pad, and it is the worst way: undone by anything
+   that later exports the pad, and lost at the next reflash. The camera can be told
+   instead - /api/v1/pinmux reports and sets what each pad is wired to, which is what
+   the pins page in OpenIPC/majestic-webui draws, and nightMode drives an IR
+   illuminator from configuration. A devmem line under general/overlay/ has to say why
+   configuration cannot express it and - since rc.local is shared - why every other
+   camera should execute it.
+
+2. Toolchain-wide flags added without measurement. BR2_TARGET_OPTIMIZATION is appended to
+   TOOLCHAIN_WRAPPER_OPTS in Buildroot's toolchain/toolchain-wrapper.mk, so it is baked
+   into the compiler wrapper and reaches every compilation unit the board builds. That is
+   a whole-image codegen and ABI change arriving as one added line per defconfig, and it
+   needs a named symptom plus a before/after size and boot check. Do not claim it drops
+   the -O level: that comes independently from BR2_OPTIMIZE_* in package/Makefile.in, and
+   asserting otherwise is a false finding this project has already seen made.
+
+3. Provenance. A package SITE must point at an OpenIPC-org repository or a documented
+   upstream, never a contributor's personal fork - a fork is a single point of failure for
+   every board that builds the package, and it can be rewritten or deleted without notice.
+   Version pins must be full 40-character SHAs or tags. Config.in help text must name the
+   URL the .mk actually fetches. Binaries lifted out of a camera's factory firmware are
+   not a source of supply: there is no source, no vendor SDK, and no way to rebuild them
+   for the next kernel.
+   Detect a binary by the DIFF MARKER, never the extension. A hunk rendered as
+   "Binary files a/... and b/... differ" is a blob whatever it is named - an executable
+   with no extension at all reads to a text-diff summariser as "contains no textual
+   changes", and that is how one shipped past review into general/overlay/, which is
+   copied verbatim into every image. Report it, and say you cannot see its contents.
+   A register initialisation table copied out of a camera vendor's own driver is the same
+   provenance failure written in C: unverifiable against a datasheet, and replacing a
+   whole table rather than adding the deltas a board needs changes every other board
+   using that sensor.
+   A new *.patch is fine against a third-party upstream (22 of the tree's 23 patched
+   packages - ffmpeg, mbedtls, vtund, libre, baresip, siproxd, zerotier, libwebsockets,
+   f2fs-tools, mini-snmpd, uacme, nabto, mavlink-router, the Realtek drivers). Against a
+   package whose *_SITE resolves to an openipc repository it is a finding ONLY when it
+   substitutes for the upstream fix rather than bridging to it: no pull request named
+   against the owning repo, or a wholesale replacement rather than a minimal delta, or
+   nothing saying it goes at the next *_VERSION bump. libevent-openipc is the tree's one
+   legitimate instance - a single hunk dropping a build-time feature check - so do not
+   report this as an absolute prohibition.
+
+4. Changes that belong to a different repository. Kernel code and kernel patches belong to
+   OpenIPC/linux. Support for one retail camera model belongs to OpenIPC/builder, under
+   devices/common/br-ext-chip-<vendor>/ - general/overlay/usr/sbin/sysupgrade already
+   encodes this split, routing lite|ultimate|neo to firmware and everything else to
+   builder. Hardware probing and bring-up tools belong to OpenIPC/ipctool. HiSilicon
+   sensor drivers and open SDK code belong to OpenIPC/openhisilicon, which is what
+   hisilicon-opensdk fetches; Sigmastar sensor drivers belong to OpenIPC/sensors. Bugs in
+   the majestic streamer belong to majestic's maintainers. Redirecting a contributor is a
+   normal, useful review outcome; say which repo and why.
+   Say which SEAM too, not only which repo. The tree already has one for every
+   board-specific thing, and a contributor who has not been shown it writes a new init
+   script with the pin numbers typed in: /usr/share/openipc/customizer.sh and
+   /usr/share/openipc/muxes.sh (both run by S30customizer), the declarative pin map
+   /usr/share/openipc/gpio.conf, late-overlays.list, and
+   general/scripts/excludes/<model>_<variant>.list. Builder ships all of them per device
+   at those same paths under devices/<board>/. An excludes list added to THIS repo is not
+   per-board - the key is <model>_<variant>, which the generic board answers to as well.
+   A comment explaining why a workaround is needed has usually already named the
+   repository that owns the fix. Read it as a redirect and quote it back.
+
+5. Monkey-patching in place of a fix. Dynamic-linker injection shims - a library forced
+   ahead of the real one through the linker's LD_* environment knob, spelled out in
+   best_practices.md section 4.1 - are not acceptable anywhere in the OpenIPC tree, in
+   firmware or in builder. Neither is a kernel module that rewrites a vendor blob's memory
+   at runtime, nor a generated facade library checked in as a binary.
+   Each of these is bound to one exact build of one blob and fails silently at the next
+   vendor drop.
+
+6. Claims without evidence. A change that can alter an image needs a stated symptom and
+   before/after output from real hardware. A test plan whose boxes are unchecked is weaker
+   than no test plan, because it asserts verification that did not happen. Such a PR
+   saying it was not tested on hardware is not reviewable. Scope this to diffs that reach
+   an image. The test is whether the diff can change what the firmware DOES on a camera,
+   not where the file lives and not whether image bytes differ - every build stamps
+   BUILD_SHA, BUILD_ID and a timestamp into /usr/lib/os-release, so by a byte measure
+   every commit qualifies and the gate becomes unsatisfiable again. Where the answer is
+   genuinely unclear, treat it as not exempt. Exempt in
+   practice: documentation, the review configuration, repository metadata, the pull
+   request template, CODEOWNERS, and CI machinery that only selects, lints or tests
+   (ci-matrix.py, the test_ and lint- scripts, check_target_modules.sh, the workflows
+   running them). Those have no camera behaviour to observe, and asking for one invites
+   the invented evidence this rule exists to catch - judge them on the evidence their
+   class admits, a self-test, selector output, a parse run.
+   Three things look exempt and are not: a defconfig CI does not build is still a real
+   image and needs more evidence than one CI builds, since the selector reports zero
+   boards for it either way; a workflow that sets a build input can change image bytes, as
+   build.yml does through BUILD_ID and BUILD_SHA reaching os-release; and the post-build
+   machinery (general/scripts/rootfs_script.sh, late-overlays.list,
+   late-post-build-hooks.list, the excludes lists) rewrites every rootfs the tree builds.
+   Claiming hardware testing that did not happen is a finding whatever the diff touches.
+
+7. Dead code and scope creep. A new source file that no Config.in selects and no .mk
+   builds is not compiled by CI, so nothing proves it even builds. And a diff must do what
+   its title says: a PR adding one sensor has no business repointing a SITE that every
+   board of that vendor consumes.
+   The overlay's mirror image of this needs saying separately, because general/overlay/
+   needs no Config.in and no .mk - anything dropped there ships, so a file nothing on the
+   camera ever opens passes every dead-code check while costing every board of every
+   vendor, several of which sit within 32 KB of their squashfs cap. But reachability is
+   SEMANTIC: a sensor .ini installed by a files/sensor/config/*.ini wildcard and chosen
+   at runtime from the configured sensor name is reachable, as is a module loaded by
+   `modprobe <name>` and an IQ profile named through isp.iqProfile. Trace the mechanism
+   before raising anything - path, basename, a name built at runtime, or an install glob
+   a documented convention selects from all count. The finding is the residue: a file
+   whose name appears nowhere, in a directory no consumer knows about.
+
+8. Commands a shipped script calls must exist on the image. A camera has no package
+   manager and often no network, and a missing command does not fail loudly - sh prints
+   "not found" to a console nobody reads and carries on, so the script reports success
+   having done nothing. Busybox applets and binaries installed by a package the board's
+   defconfig selects are the whole set. ipctool is the trap that looks like an exception:
+   general/package/ipctool/ipctool.mk installs ipcinfo and nothing else, so
+   BR2_PACKAGE_IPCTOOL=y puts no "ipctool" on the image; /usr/sbin/ipctool is a symlink to
+   extutils, whose ipctool arm downloads the tool from the ipctool repository's "latest"
+   release into /tmp on first use. That is a convenience for a person at a shell, and in
+   a boot script it is a network fetch during boot, from a floating tag, repeated every
+   boot because /tmp is tmpfs, and a silent no-op until the network is up.
+   Relatedly, a shipped script bounces the streamer with /etc/init.d/S95majestic restart.
+   A hand-rolled killall-and-relaunch loses the -s argument, the start-stop-daemon -x
+   lookup, the ten-second wait for the old process to release the sensor HAL, and the
+   trap '' HUP that S95majestic carries because the disposition survives exec() where a
+   handler does not.
+
+Do not report: speculation about whether a change was written with AI assistance - judge
+the diff on blast radius, provenance, evidence, and repo ownership, never on writing
+style, comment density, formatting, or phrasing; shell style preferences that busybox ash
+accepts; missing unit tests for vendor driver code that cannot run off-target; or the
+naming of vendor blobs that predate the diff.
+"""
+
+compliance_user_guidelines = """
+Apply pr_compliance_checklist.yaml literally and only to lines the diff adds or changes.
+Do not raise a finding for pre-existing code that the diff merely moves or reindents.
+
+Note especially: a device-specific value added to general/overlay/ or to a shared
+load_<vendor> script fails the blast-radius gate even when it is correct for the board the
+contributor tested, because it changes the default for cameras already in the field. And
+dynamic-linker injection shims (best_practices.md section 4.1) have no sanctioned use in
+this tree - a majestic bug that appears to need one is a majestic issue, not a firmware
+change.
+"""

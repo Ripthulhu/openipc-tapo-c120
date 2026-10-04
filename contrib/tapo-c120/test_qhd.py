@@ -135,7 +135,7 @@ def test_pruning(root):
         module = target / "lib/modules/5.10"
         for name in ("modules.dep", "modules.alias", "modules.dep.bin", "modules.builtin.modinfo"):
             write(module / name, "index\n")
-        env = dict(os.environ, TARGET_DIR=str(target), BR2_CONFIG=str(config),
+        env = dict(os.environ, TARGET_DIR=str(target), BR2_CONFIG=str(config), BINARIES_DIR=str(target / "images"),
                    BR2_EXTERNAL_GENERAL_PATH=str(REPO / "general"), OPENIPC_SOC_MODEL="fixture",
                    OPENIPC_VARIANT="lite")
         subprocess.run(["bash", str(script)], env=env, check=True)

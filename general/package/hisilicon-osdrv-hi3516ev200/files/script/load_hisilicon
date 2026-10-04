@@ -31,6 +31,17 @@ os_mem_size=${os_mem_size:=32}
 
 YUV_TYPE0=0 # 0 -- raw, 1 --DC, 2 --bt1120, 3 --bt656
 
+# DVP-wired sensor boards — opt-in, set by the device profile.
+#
+# open_sys_config selects MIPI or DVP pad routing from g_cmos_yuv_flag.
+# A board that wires its sensor to the DVP pads needs the DVP path;
+# with the MIPI default the I2C controller is muxed to pads that are
+# not connected to the sensor, so every address NACKs and no sensor is
+# ever detected.  Profiles opt in with `fw_setenv sensor_dvp 1`.
+if [ "$(fw_printenv -n sensor_dvp 2>/dev/null)" = "1" ]; then
+	YUV_TYPE0=1
+fi
+
 ##################################################################
 #
 # DDR start:0x40000000, kernel start:0x40000000,  OS(32M); MMZ start:0x42000000
@@ -208,9 +219,34 @@ insert_ko() {
 	modprobe open_mipi_rx
 	#	modprobe open_user
 	modprobe open_wdt
+
+	# Cipher engine -> /dev/cipher. majestic's native WebRTC takes AES-CTR
+	# for its SRTP transform from here: measured on an hi3516ev300, 86.0us of
+	# CPU per 1100-byte packet in software against 41.9 through the engine,
+	# because the driver sleeps on its completion interrupt and gives the CPU
+	# back while the block works. See docs/hisi/cipher-engine.md in majestic.
+	#
+	# New here in a way it is not on the other HiSilicon boards: this family
+	# never packaged a cipher module at all, and openhisilicon only started
+	# building one for hi3516ev200 recently. The vendor prebuilt could not
+	# have been used -- it links against hil_mmb_getby_phys_2, which this
+	# tree's osal did not export.
+	#
+	# Last, and after open_osal: modprobe would otherwise pull osal in as a
+	# dependency at whatever point this ran, ahead of insert_osal's own
+	# arguments. Failure is not an error -- an image built before that
+	# openhisilicon bump simply has no module to find, and that must not
+	# abort sensor bring-up.
+	# `|| true` because this is the LAST statement of insert_ko, which is
+	# in turn the last statement of the script, so its status becomes the
+	# exit status S70vendor reports. Without it an image whose
+	# openhisilicon predates the module loads every driver correctly and
+	# still reports "Loading vendor modules..." as a failure.
+	modprobe open_cipher 2>/dev/null || true
 }
 
 remove_ko() {
+	rmmod -w open_cipher 2>/dev/null
 	rmmod -w open_wdt
 	#	rmmod -w hi_user
 	remove_audio
@@ -369,6 +405,16 @@ fi
 # Sensor config
 # SENSOR=${SENSOR:=imx307}
 #
+# A failed probe used to be stored as sensor=unknown, and rcS exports the
+# stored value into SENSOR before this ever runs -- so an already-latched
+# camera arrives here with SENSOR=unknown, takes the "set manually" branch
+# below, and never probes again however the real fault is fixed. Treat it
+# as unset and drop it from the environment so this boot re-detects. #2428.
+if [ "$SENSOR" = "unknown" ]; then
+	SENSOR=
+	fw_setenv sensor
+fi
+
 if [ -n "$SENSOR" ]; then
 	logger -s -p daemon.info -t hisilicon "Manualy set SENSOR as ${SENSOR}"
 else
@@ -382,7 +428,15 @@ else
 		export SENSOR=${SENSOR_DETECT:=unknown}
 		remove_detect
 		logger -s -p daemon.info -t hisilicon "Get data from ipcinfo and set SENSOR as ${SENSOR}"
-		fw_setenv sensor $SENSOR && logger -s -p daemon.info -t hisilicon "Write detected ${SENSOR} to U-Boot ENV"
+		# Do not persist a failed detection. The fw_printenv branch above wins
+		# whenever `sensor` exists, so writing "unknown" here latches the camera
+		# into "SENSOR is not detected, aborting..." for good -- detection never
+		# runs again and nothing says why. Seen on a GK7202V500 in #2428.
+		# load_ingenic has always cleared the variable instead of storing the
+		# miss; this is the same behaviour, reached by not writing at all.
+		if [ "$SENSOR" != "unknown" ]; then
+			fw_setenv sensor $SENSOR && logger -s -p daemon.info -t hisilicon "Write detected ${SENSOR} to U-Boot ENV"
+		fi
 	fi
 fi
 

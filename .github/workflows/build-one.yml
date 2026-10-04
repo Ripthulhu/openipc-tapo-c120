@@ -44,17 +44,14 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.ref }}
 
-      - name: Checkout workflow scripts
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: .ci-workflow
-          sparse-checkout: .github/scripts
-
       - name: Prepare firmware
         run: |
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
           echo CACHE_DATE=$(date +%m) >> ${GITHUB_ENV}
+          # Same fix, and the same reason, as build.yml's: buildroot's DL_DIR
+          # defaults to output/buildroot-$(BR_VER)/dl, so the output/dl this
+          # workflow caches and prunes never existed. See the comment there.
+          echo "BR2_DL_DIR=${GITHUB_WORKSPACE}/output/dl" >> ${GITHUB_ENV}
 
       - name: Setup ccache
         uses: actions/cache@v4
@@ -62,18 +59,97 @@ jobs:
           path: /tmp/ccache
           key: ${{inputs.platform}}-${{env.CACHE_DATE}}
 
-      - name: Setup dl cache
-        uses: actions/cache@v4
+      # Restore-only, deliberately. `dl-<month>` is one key shared with the
+      # whole build.yml matrix, and actions/cache saves only on a key miss, so
+      # whoever writes it first freezes that month's snapshot. This workflow
+      # builds a single board on manual dispatch; letting it win that race would
+      # pin the shared cache to one board's dependencies for the rest of the
+      # month. It consumes the cache, it does not get to define it.
+      - name: Restore dl cache
+        uses: actions/cache/restore@v4
         with:
           path: output/dl
           key: dl-${{env.CACHE_DATE}}
           restore-keys: dl-
 
+      - name: Refresh moving-ref package downloads
+        run: |
+          # Packages pinned to a moving ref keep a constant download filename. The dl
+          # cache key is the month (date +%m) and actions/cache only saves on a key
+          # miss, so that snapshot is frozen for weeks; buildroot then keeps reusing the
+          # stale tarball and silently ships an old version. This is what desynced
+          # majestic-webui from majestic (blanking settings labels; later a t31 lite
+          # image shipped a pre-x-groups majestic vs the current webui — "No settings
+          # groups in schema"). Drop both naming forms so buildroot re-fetches each run:
+          #   - dash:  <pkg>-<ref>.tar.gz   e.g. majestic-webui-dist.tar.gz
+          #   - dot:   <pkg>.<ref>.tar.bz2  e.g. majestic.t31.lite.master.tar.bz2
+          # The dot form is majestic's S3 tarball — it LOOKS S3-pinned but is a moving
+          # `master` build re-uploaded every majestic CI run, with no .hash to force a
+          # refetch. Only genuinely content-addressed tarballs (semver / SHA) keep cache.
+          #
+          # Not silenced, for the reason given in build.yml: the suppression is
+          # what let this run against a missing directory unnoticed.
+          if [ -d "${BR2_DL_DIR}" ]; then
+            find "${BR2_DL_DIR}" -type f -regextype posix-extended \
+              -regex '.*[-.](HEAD|master|main|dist)\.tar\.(gz|bz2|xz)' \
+              -print -delete
+            # And the kernel, which the pattern above cannot see. Every board
+            # fetches it from openipc/linux/archive/<branch>.tar.gz -- 122 of the
+            # defconfigs -- so the filename is the BRANCH name, hisilicon-hi3516cv500
+            # .tar.gz or ingenic-t31.tar.gz. That is a moving ref with a constant
+            # name and no .hash, exactly the case this step exists for, but it
+            # ends in none of the four words above. A kernel fix merged today
+            # would otherwise wait for the monthly cache key to roll over before
+            # any nightly built it. Buildroot keeps custom kernel tarballs in the
+            # package's own dl subdirectory, so this reaches them and nothing else.
+            if [ -d "${BR2_DL_DIR}/linux" ]; then
+              find "${BR2_DL_DIR}/linux" -maxdepth 1 -type f -name '*.tar.gz' \
+                -print -delete
+            else
+              echo "no kernel archive cached yet -- nothing to refresh."
+            fi
+          else
+            echo "dl cache is cold (${BR2_DL_DIR} absent) -- nothing to refresh."
+          fi
+
       - name: Build firmware
         env:
           BUILD_ID:  ${{ needs.resolve.outputs.tag_name }}
           BUILD_SHA: ${{ needs.resolve.outputs.ref }}
-        run: bash .ci-workflow/.github/scripts/build_firmware.sh "${{inputs.platform}}"
+        run: |
+          export GIT_HASH=$(git rev-parse --short ${GITHUB_SHA})
+          export GIT_BRANCH=${GITHUB_REF_NAME}
+          echo GIT_HASH=${GIT_HASH} >> ${GITHUB_ENV}
+          echo GIT_BRANCH=${GIT_BRANCH} >> ${GITHUB_ENV}
+
+          mkdir -p /tmp/ccache
+          ln -s /tmp/ccache ${HOME}/.ccache
+
+          backoffs="30 60 120 300 600 1200"
+          attempt=1
+          for sleep_for in $backoffs ""; do
+            make BOARD=${{inputs.platform}} && break
+            if [ -z "$sleep_for" ]; then
+              echo "::error::build failed after ${attempt} attempts"
+              exit 1
+            fi
+            echo "::warning::attempt ${attempt} failed, retrying after ${sleep_for}s"
+            sleep "$sleep_for"
+            attempt=$((attempt + 1))
+          done
+
+          TIME=$(date -d @${SECONDS} +%M:%S)
+          echo TIME=${TIME} >> ${GITHUB_ENV}
+
+          NORFW=$(find output/images -name openipc*nor*)
+          if [ -e ${NORFW} ]; then
+            echo NORFW=${NORFW} >> ${GITHUB_ENV}
+          fi
+
+          NANDFW=$(find output/images -name openipc*nand*)
+          if [ -e ${NANDFW} ]; then
+            echo NANDFW=${NANDFW} >> ${GITHUB_ENV}
+          fi
 
       - name: Verify kernel modules
         run: sh .github/scripts/check_target_modules.sh

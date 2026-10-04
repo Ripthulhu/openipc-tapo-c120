@@ -6,6 +6,21 @@ BR_CONF = $(TARGET)/openipc_defconfig
 TARGET ?= $(PWD)/output
 export CMAKE_POLICY_VERSION_MINIMUM := 3.5
 
+# GCC 15 defaults to -std=gnu23, where an empty parameter list means "takes no
+# arguments" rather than "unspecified". Several host packages Buildroot pins
+# here predate that and their configure probes stop compiling: gmp 6.3.0 fails
+# its compiler test with "too many arguments to function 'g'", which surfaces as
+# the far less helpful "could not find a working compiler" and halts any
+# `make toolchain` on a current distro. Pin the dialect rather than carry a
+# version bump for every affected host package. Applies only to host C builds,
+# is overridable from the environment, and is a no-op on hosts whose GCC still
+# defaults to gnu17.
+#
+# "Applies only to host C builds" is what the prepare: rule below has to make
+# true -- Buildroot appends HOST_CFLAGS to HOST_CXXFLAGS wholesale.
+HOST_CFLAGS ?= -O2 -std=gnu17
+export HOST_CFLAGS
+
 CONFIG = $(error variable BOARD not defined)
 TIMER := $(shell date +%s)
 
@@ -21,7 +36,11 @@ CONFIG := $(shell find br-ext-*/configs -name '$(BOARD)_defconfig' -print -quit)
 include $(CONFIG)
 endif
 
-all: build repack timer
+ifneq ($(filter repack,$(MAKECMDGOALS)),)
+-include $(BR_CONF)
+endif
+
+all: repack-final timer
 
 build: defconfig
 	@$(BR_MAKE) all -j$(shell nproc)
@@ -39,6 +58,42 @@ prepare:
 	@if test ! -e $(TARGET)/buildroot-$(BR_VER); then \
 		wget -c -q $(BR_LINK)/$(BR_VER).tar.gz -O $(BR_FILE); \
 		mkdir -p $(TARGET); tar -xf $(BR_FILE) -C $(TARGET); fi
+	@# The majestic and majestic-webui tarballs are rolling release assets:
+	@# a fixed filename, no hash, refreshed upstream whenever those repos
+	@# publish. Buildroot's dl cache keeps the first copy forever, so a
+	@# from-source build with an old cache pairs a majestic that expects the
+	@# setup page with a webui from before the page existed -- the browser
+	@# door then 404s while SSH works. Expire cached copies after a day;
+	@# fresh ones are kept, offline rebuilds inside that window still work,
+	@# and CI downloads into an empty cache every run and never gets here.
+	@find $(or $(BR2_DL_DIR),$(TARGET)/buildroot-$(BR_VER)/dl) -maxdepth 2 \
+		\( -name 'majestic.*.master.tar.bz2' -o -name 'majestic-webui-dist.tar.gz' \) \
+		-mmin +1440 -delete 2>/dev/null || true
+	@if test -f $(TARGET)/buildroot-$(BR_VER)/linux/Config.in; then \
+		sed -i '/source "$$(BR2_EXTERNAL_GENERAL_PATH)\/linux\/Config.ext.in"/d' \
+			$(TARGET)/buildroot-$(BR_VER)/linux/Config.in; \
+		grep -qF 'source "$$BR2_EXTERNAL_GENERAL_PATH/linux/Config.ext.in"' \
+			$(TARGET)/buildroot-$(BR_VER)/linux/Config.in || \
+		sed -i '/source "linux\/Config.ext.in"/a source "$$BR2_EXTERNAL_GENERAL_PATH/linux/Config.ext.in"' \
+			$(TARGET)/buildroot-$(BR_VER)/linux/Config.in; \
+	fi
+	@# Keep the C dialect pinned at the top of this file out of host C++ builds.
+	@# package/Makefile.in does `HOST_CXXFLAGS += $$(HOST_CFLAGS)`, so -std=gnu17
+	@# reaches every host C++ compile, where it is not a C++ dialect at all: g++
+	@# ignores it and prints "command-line option '-std=gnu17' is valid for
+	@# C/ObjC but not for C++". Compilation still succeeds -- what does not is
+	@# CMake, whose cm_check_cxx_feature discards any feature whose try_compile
+	@# output contains the word "warning" (Source/Checks/cm_cxx_features.cmake).
+	@# host-cmake therefore decides the compiler has no std::unique_ptr and
+	@# aborts its own configure, taking every `make BOARD=...` with it.
+	@# Filtering -std= rather than that one value so a C dialect set from the
+	@# environment does not reintroduce this.
+	@if test -f $(TARGET)/buildroot-$(BR_VER)/package/Makefile.in; then \
+		grep -qF 'filter-out -std=%' \
+			$(TARGET)/buildroot-$(BR_VER)/package/Makefile.in || \
+		sed -i 's|^HOST_CXXFLAGS += \$$(HOST_CFLAGS)$$|HOST_CXXFLAGS += $$(filter-out -std=%,$$(HOST_CFLAGS))|' \
+			$(TARGET)/buildroot-$(BR_VER)/package/Makefile.in; \
+	fi
 
 help:
 	@printf "BR-OpenIPC usage:\n \
@@ -98,8 +153,30 @@ endif
 	@$(BR_MAKE) sdk -j$(shell nproc)
 	@$(call BUNDLE_SDK)
 
+repack-final: build
+	@$(MAKE) --no-print-directory BOARD=$(BOARD) TARGET=$(TARGET) repack
+
 repack:
+ifeq ($(BR2_PACKAGE_OPENIPC_NFS_ROOT),y)
+ifeq ($(BR2_OPENIPC_SOC_VENDOR),"rockchip")
+	@$(call PREPARE_REPACK,zboot.img,16384,,,nfs-root)
+else
+	@$(call PREPARE_REPACK,uImage,16384,,,nfs-root)
+endif
+else
 ifeq ($(BR2_OPENIPC_SOC_FAMILY),"hi3516cv6xx")
+# The cv610 u-boot boots from a fixed table: 2048K(kernel) read whole by
+# `sf read ${kernaddr} ${kernsize}`, then 5120K(rootfs) at a fixed offset. The
+# combined firmware.bin hides both bounds, so on the 8 MiB part measure the two
+# halves against their slots here, where a PR sees it. 16 MiB is left on the
+# whole-blob figure: its kernel already overruns 2048K on master, and that is a
+# u-boot table question, not one a size check here can settle.
+ifeq ($(BR2_OPENIPC_FLASH_SIZE),"8")
+	@$(call CHECK_SIZE,fitImage,2048)
+	@$(call CHECK_SIZE,rootfs.squashfs,5120)
+endif
+	@$(call PREPARE_REPACK,firmware.bin,$(shell expr $(subst ",,$(BR2_OPENIPC_FLASH_SIZE)) \* 1024),,,nor)
+else ifeq ($(BR2_OPENIPC_SOC_FAMILY),"hi3519dv500")
 	@$(call PREPARE_REPACK,firmware.bin,$(shell expr $(subst ",,$(BR2_OPENIPC_FLASH_SIZE)) \* 1024),,,nor)
 else ifneq ($(wildcard $(TARGET)/images/firmware.bin),)
 	@$(call PREPARE_REPACK,firmware.bin,8192,,,nor)
@@ -116,12 +193,22 @@ endif
 ifeq ($(BR2_TARGET_ROOTFS_UBI),y)
 ifneq ($(filter $(BR2_OPENIPC_SOC_VENDOR),"rockchip" "sigmastar"),)
 	@$(call PREPARE_REPACK,,,rootfs.ubi,16384,nand)
+else ifneq ($(wildcard $(PWD)/br-ext-chip-$(subst ",,$(BR2_OPENIPC_SOC_VENDOR))/board/$(subst ",,$(BR2_OPENIPC_SOC_FAMILY))/nand-fit.its),)
+# FIT NAND (board/<family>/nand-fit.its): the kernel lives in the `kernel` UBI
+# volume, so the package carries what sysupgrade writes into each volume --
+# fitImage and rootfs.ubifs -- and rootfs.ubi for a fresh install. Measured
+# against the volume sizes in the board's ubinize-nand.cfg.
+	@$(call CHECK_SIZE,fitImage,4096)
+	@$(call CHECK_SIZE,rootfs.ubifs,32768)
+	@$(call CHECK_SIZE,rootfs.ubi,16384)
+	@$(call REPACK_NAND_FIT)
 else
 	@$(call PREPARE_REPACK,uImage,4096,rootfs.ubi,16384,nand)
 endif
 endif
 ifeq ($(BR2_TARGET_ROOTFS_INITRAMFS),y)
 	@$(call PREPARE_REPACK,uImage,16384,,,initramfs)
+endif
 endif
 endif
 
@@ -206,12 +293,20 @@ define PREPARE_REPACK
 	$(call REPACK_FIRMWARE,$(1),$(3),$(5))
 endef
 
+# The headroom line exists because "fits" and "only just fits" read the same in
+# a green build. hi3519v101_lite sat at exactly 5120KB of a 5120KB cap for weeks
+# -- reported, passing, and one 34-line edit from the overflow it hit on
+# 2026-08-18. 32KB is the threshold because what tips these boards is a change
+# to the shared overlay, which is single-digit KB at a time; a board under that
+# is a couple of ordinary commits from red, and a board over it is not.
 define CHECK_SIZE
 	$(eval FILE_SIZE = $(shell expr $(shell stat -c %s $(TARGET)/images/$(1) || echo 0) / 1024))
 	if test $(FILE_SIZE) -eq 0; then exit 1; fi
 	echo - $(1): [$(FILE_SIZE)KB/$(2)KB]
 	if test $(FILE_SIZE) -gt $(2); then \
 		echo -- size exceeded by: $(shell expr $(FILE_SIZE) - $(2))KB; exit 1; fi
+	if test $(shell expr $(2) - $(FILE_SIZE)) -lt 32; then \
+		echo -- headroom warning: $(1) has $(shell expr $(2) - $(FILE_SIZE))KB left of $(2)KB; fi
 endef
 
 define REPACK_FIRMWARE
@@ -220,9 +315,30 @@ define REPACK_FIRMWARE
 	$(if $(2),cd $(TARGET)/images && if test -e $(2); then mv -f $(2) $(2).$(BR2_OPENIPC_SOC_MODEL); fi)
 	$(if $(1),cd $(TARGET)/images && md5sum $(1).$(BR2_OPENIPC_SOC_MODEL) > $(1).$(BR2_OPENIPC_SOC_MODEL).md5sum)
 	$(if $(2),cd $(TARGET)/images && md5sum $(2).$(BR2_OPENIPC_SOC_MODEL) > $(2).$(BR2_OPENIPC_SOC_MODEL).md5sum)
-	$(if $(1),$(eval KERNEL = $(1).$(BR2_OPENIPC_SOC_MODEL) $(1).$(BR2_OPENIPC_SOC_MODEL).md5sum),$(eval KERNEL =))
-	$(if $(2),$(eval ROOTFS = $(2).$(BR2_OPENIPC_SOC_MODEL) $(2).$(BR2_OPENIPC_SOC_MODEL).md5sum),$(eval ROOTFS =))
+	$(if $(1),$(eval KERNEL = $(1).$(BR2_OPENIPC_SOC_MODEL)),$(eval KERNEL =))
+	$(if $(2),$(eval ROOTFS = $(2).$(BR2_OPENIPC_SOC_MODEL)),$(eval ROOTFS =))
+	$(if $(1),$(eval KERNEL_MD5 = $(1).$(BR2_OPENIPC_SOC_MODEL).md5sum),$(eval KERNEL_MD5 =))
+	$(if $(2),$(eval ROOTFS_MD5 = $(2).$(BR2_OPENIPC_SOC_MODEL).md5sum),$(eval ROOTFS_MD5 =))
 	$(eval ARCHIVE = openipc.$(BR2_OPENIPC_SOC_MODEL)-$(3)-$(BR2_OPENIPC_VARIANT).tgz)
-	cd $(TARGET)/images && tar -czf $(ARCHIVE) $(KERNEL) $(ROOTFS)
+	# Checksums first, so an unpack that runs out of room in /tmp on a 32 MB
+	# camera loses the IMAGE and keeps the .md5sum that convicts it. The other
+	# order loses the checksum and leaves a short image that sysupgrade's
+	# `md5sum -c *.md5sum` then cannot see at all.
+	cd $(TARGET)/images && tar -czf $(ARCHIVE) $(KERNEL_MD5) $(ROOTFS_MD5) $(KERNEL) $(ROOTFS)
+	rm -f $(TARGET)/images/*.md5sum
+endef
+
+# The FIT NAND package: three images, so not REPACK_FIRMWARE's two. Copies
+# rather than renames -- rootfs.ubifs stays where buildroot left it, and the
+# NOR package built from the same tree does not share any of these names.
+NAND_FIT_IMAGES = fitImage rootfs.ubifs rootfs.ubi
+define REPACK_NAND_FIT
+	cd $(TARGET)/images && for f in $(NAND_FIT_IMAGES); do \
+		cp -f $$f $$f.$(BR2_OPENIPC_SOC_MODEL) && \
+		md5sum $$f.$(BR2_OPENIPC_SOC_MODEL) > $$f.$(BR2_OPENIPC_SOC_MODEL).md5sum || exit 1; done
+	# Checksums first, as in REPACK_FIRMWARE.
+	cd $(TARGET)/images && tar -czf openipc.$(BR2_OPENIPC_SOC_MODEL)-nand-$(BR2_OPENIPC_VARIANT).tgz \
+		$(foreach f,$(NAND_FIT_IMAGES),$(f).$(BR2_OPENIPC_SOC_MODEL).md5sum) \
+		$(foreach f,$(NAND_FIT_IMAGES),$(f).$(BR2_OPENIPC_SOC_MODEL))
 	rm -f $(TARGET)/images/*.md5sum
 endef

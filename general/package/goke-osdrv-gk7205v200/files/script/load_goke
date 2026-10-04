@@ -21,6 +21,36 @@ os_mem_size=${os_mem_size:=32}
 BOARD=demo
 YUV_TYPE0=0 # 0 -- raw, 1 --DC, 2 --bt1120, 3 --bt656
 
+# DVP-wired sensor boards -- OPT-IN, set by the device profile.
+#
+# open_sys_config selects MIPI or DVP pad routing from its chip= and
+# g_cmos_yuv_flag= arguments. A board that wires the sensor to the DVP pads
+# needs the DVP path; with the MIPI arguments the i2c controller is muxed to
+# pads that are not connected to the sensor, so every address NACKs and no
+# sensor is ever detected.
+#
+# Keyed off an env var rather than the SoC name on purpose: both wirings exist
+# on gk7202v300, so testing $CHIP_TYPE here would fix DVP boards by breaking
+# every MIPI one. Profiles opt in with `fw_setenv sensor_dvp 1`.
+# SYSCFG_CHIP is the value handed to open_sys_config's chip= selector, which is
+# NOT the same thing as CHIP_TYPE (the detected SoC). They coincide by default;
+# a DVP board needs the gk7205v200 pad-routing tables while still BEING a
+# gk7202v300. Keeping them separate leaves CHIP_TYPE meaning exactly one thing,
+# so existing and future chip-specific branches are unaffected by this opt-in.
+SYSCFG_CHIP=$CHIP_TYPE
+if [ "$(fw_printenv -n sensor_dvp 2>/dev/null)" = "1" ]; then
+	YUV_TYPE0=1
+	# Only gk7202v300 needs to borrow another chip's tables. Its pinmux() branch
+	# is MIPI-only — it ignores g_cmos_yuv_flag entirely and always calls
+	# i2c0_for_mipi_sensor_pin_mux/vi_mipi_rx_mux — so there is no DVP path
+	# reachable for it at any flag value. gk7205v200 and gk7205v300 each have
+	# their own DVP path already; forcing a v300 onto the v200 VI pad table would
+	# be exactly this bug pointing the other way.
+	if [ "$CHIP_TYPE" = "gk7202v300" ]; then
+		SYSCFG_CHIP=gk7205v200
+	fi
+fi
+
 cd /lib/modules/$(uname -r)/goke/
 
 ##################################################################
@@ -91,7 +121,7 @@ insert_osal() {
 }
 
 insert_detect() {
-	modprobe open_sys_config chip=$CHIP_TYPE sensors=unknown g_cmos_yuv_flag=$YUV_TYPE0 board=$BOARD
+	modprobe open_sys_config chip=$SYSCFG_CHIP sensors=unknown g_cmos_yuv_flag=$YUV_TYPE0 board=$BOARD
 	insert_osal
 	insmod gk7205v200_base.ko
 	modprobe open_isp
@@ -164,7 +194,54 @@ insert_ko() {
 	if [ "$SENSOR" == "bt656" ] || [ "$SENSOR" == "jxf23_dc" ]; then
 		YUV_TYPE0=1
 	fi
-	modprobe open_sys_config chip=$CHIP_TYPE sensors=$SENSOR g_cmos_yuv_flag=$YUV_TYPE0 board=$BOARD
+	modprobe open_sys_config chip=$SYSCFG_CHIP sensors=$SENSOR g_cmos_yuv_flag=$YUV_TYPE0 board=$BOARD
+	# open_sys_config takes MCLK only from its module parameters and defaults to
+	# 27 MHz at this chip=. A sensor init table tuned for 24 MHz (the GC2053
+	# ForCar tables are) then runs against the wrong clock. The ini's MCLK key is
+	# not consulted on this path, so the register is written directly.
+	# CRG PERI_CRG60 @ 0x120100F0 — sns0 clock select is bits [5:2] ONLY:
+	#   0x0:74.25  0x1:72  0x2:54  0x3:24  0x4:37.125  0x5:36  0x6:27  0x7:12 (MHz)
+	#
+	# Read-modify-write just that field, matching what the driver itself does
+	# (sensor_clock_config() is reg_write32(clock << 2, 0xF << 2, base+0xF0)).
+	# Storing the whole word would also clear bits [31:6] and set bit 0, which
+	# nothing in the driver ever does — it happens to select the right clock, but
+	# by accident of the constant rather than by writing the field.
+	#
+	# A wrong MCLK does not fail loudly: it yields a corrupted or absent image
+	# while every log line still looks healthy. Hence -s, so a failure reaches the
+	# console the way "SENSOR is not detected" does.
+	#
+	# ASYMMETRY, deliberate but worth knowing: sensor_dvp applies to insert_detect
+	# too, this does not. First-boot autodetect therefore probes at the sensor
+	# table's default clock. i2c is master-clocked so detection still works, but
+	# it will surprise someone eventually.
+	mclk="$(fw_printenv -n sensor_mclk 2>/dev/null)"
+	if [ -n "$mclk" ]; then
+		case "$mclk" in
+			74.25)  mclk_sel=0 ;;
+			72)     mclk_sel=1 ;;
+			54)     mclk_sel=2 ;;
+			24)     mclk_sel=3 ;;
+			37.125) mclk_sel=4 ;;
+			36)     mclk_sel=5 ;;
+			27)     mclk_sel=6 ;;
+			12)     mclk_sel=7 ;;
+			*)      mclk_sel="" ;;
+		esac
+		if [ -z "$mclk_sel" ]; then
+			logger -s -p daemon.err -t goke "sensor_mclk=$mclk is not a supported MCLK (74.25/72/54/24/37.125/36/27/12); leaving the sensor table default"
+		elif ! command -v devmem >/dev/null 2>&1; then
+			logger -s -p daemon.err -t goke "sensor_mclk=$mclk requested but devmem is missing; leaving the sensor table default"
+		else
+			mclk_cur="$(devmem 0x120100F0)"
+			if [ -z "$mclk_cur" ]; then
+				logger -s -p daemon.err -t goke "sensor_mclk=$mclk: could not read PERI_CRG60; leaving the sensor table default"
+			elif ! devmem 0x120100F0 32 $(( (mclk_cur & ~0x3C) | (mclk_sel << 2) )); then
+				logger -s -p daemon.err -t goke "sensor_mclk=$mclk: MCLK write failed; sensor may not produce a usable image"
+			fi
+		fi
+	fi
 	insert_osal
 	insmod gk7205v200_base.ko
 	insmod gk7205v200_sys.ko
@@ -193,6 +270,31 @@ insert_ko() {
 	modprobe open_mipi_rx
 	# insmod gk7205v200_pm.ko                       # unused on OpenIPC
 	modprobe open_wdt
+
+	# Cipher engine -> /dev/cipher. majestic's native WebRTC takes AES-CTR
+	# for its SRTP transform from here, a burst of packets per ioctl: on a
+	# gk7205v200 with one viewer at 4 Mbit/s that is 20.0% of a core in
+	# software against 15.9% through the engine, and at 50 Mbit/s it is the
+	# difference between holding the configured bitrate at 20 fps and
+	# managing 40 Mbit/s at 11. See docs/hisi/cipher-engine.md in majestic.
+	#
+	# WORTH LOADING ONLY WITH A DRIVER THAT BATCHES. Driven one packet at a
+	# time the same engine saves nothing measurable — the ioctl, the DMA
+	# allocation and the sleep cost about what the AES does — so this line
+	# is paired with the openhisilicon bump that carries the batched
+	# command, not with the one that first built the module.
+	#
+	# Last, and after insert_osal: modprobe would otherwise pull osal in as
+	# a dependency at whatever point this ran, ahead of insert_osal's own
+	# arguments. Failure is not an error -- an image built before that
+	# openhisilicon bump simply has no module to find, and that must not
+	# abort sensor bring-up. Same shape as load_hisilicon's.
+	# `|| true` because this is the LAST statement of insert_ko, which is in
+	# turn the last statement of the script, so its status becomes the exit
+	# status S70vendor reports. Without it an image whose openhisilicon
+	# predates the module loads every driver correctly and still reports
+	# "Loading vendor modules..." as a failure.
+	modprobe open_cipher 2>/dev/null || true
 }
 
 remove_ko() {
@@ -202,6 +304,7 @@ remove_ko() {
 	# to satisfy load_goke's insmod-by-filename pattern). insmod uses the
 	# filename, but rmmod takes the in-kernel module name — so this list
 	# must be open_* to match what `lsmod` actually shows.
+	rmmod -w open_cipher 2>/dev/null
 	rmmod -w open_wdt
 	# rmmod -w open_pm                                 # unused on OpenIPC
 	remove_audio
@@ -352,6 +455,16 @@ if [ $# -lt 1 ]; then
 fi
 
 if [ $b_arg_insmod -eq 1 ]; then
+	# A failed probe used to be stored as sensor=unknown, and rcS exports the
+	# stored value into SENSOR before this ever runs -- so an already-latched
+	# camera arrives here with SENSOR=unknown, takes the "set manually" branch
+	# below, and never probes again however the real fault is fixed. Treat it
+	# as unset and drop it from the environment so this boot re-detects. #2428.
+	if [ "$SENSOR" = "unknown" ]; then
+		SENSOR=
+		fw_setenv sensor
+	fi
+
 	if [ -n "$SENSOR" ]; then
 		logger -s -p daemon.info -t goke "SENSOR: ${SENSOR}"
 	else
@@ -364,7 +477,15 @@ if [ $b_arg_insmod -eq 1 ]; then
 			export SENSOR=${SENSOR_DETECT:=unknown}
 			remove_detect
 			logger -s -p daemon.info -t goke "Get data from ipcinfo and set SENSOR as ${SENSOR}"
-			fw_setenv sensor $SENSOR && logger -s -p daemon.info -t goke "Writing ${SENSOR} to U-Boot ENV"
+			# Do not persist a failed detection. The fw_printenv branch above wins
+			# whenever `sensor` exists, so writing "unknown" here latches the camera
+			# into "SENSOR is not detected, aborting..." for good -- detection never
+			# runs again and nothing says why. Seen on a GK7202V500 in #2428.
+			# load_ingenic has always cleared the variable instead of storing the
+			# miss; this is the same behaviour, reached by not writing at all.
+			if [ "$SENSOR" != "unknown" ]; then
+				fw_setenv sensor $SENSOR && logger -s -p daemon.info -t goke "Writing ${SENSOR} to U-Boot ENV"
+			fi
 		fi
 	fi
 fi

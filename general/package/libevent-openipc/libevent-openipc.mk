@@ -6,8 +6,20 @@
 
 LIBEVENT_OPENIPC_SITE_METHOD = git
 LIBEVENT_OPENIPC_SITE = https://github.com/OpenIPC/libevent
-# Pinned OpenIPC fork includes the build toggles, musl mmap and WebSocket fixes.
-# A moving pull-request ref broke clean builds when its author rebased it.
+# Branch 'openipc': upstream master, plus the two pull requests libevent has
+# not reviewed -- #1867, which adds the EVENT__DISABLE_* toggles this package
+# builds with, and #1865 -- plus the BROKEN_MMAP shim this package used to
+# carry as patch 0002, plus the evws send-after-close fix (OpenIPC/libevent#2).
+# The upstream pull requests stay open there; when one lands, the commit drops
+# out of the branch rather than out of this file.
+#
+# By commit, not by branch. This package used to track the pull request
+# directly, as refs/pull/1867/head on a repository nobody here controls. That
+# ref is resolved at download time, the author rebased it on 2026-08-29, and
+# every clean build of the boards selecting this package began failing on a
+# patch that no longer applied -- with nothing in this tree having changed.
+# Owning the repository takes the force-push out of a stranger's hands;
+# pinning the commit takes the resolve-at-download-time out of the build.
 LIBEVENT_OPENIPC_VERSION = 694decef35717d8955aa34ba4d2baaaf61c9e4a9
 
 LIBEVENT_OPENIPC_INSTALL_STAGING = YES
@@ -26,6 +38,12 @@ define LIBEVENT_OPENIPC_REMOVE_PYSCRIPT
 	rm $(TARGET_DIR)/usr/bin/event_rpcgen.py
 endef
 
+# The build emits both the split libraries -- core, extra, pthreads, mbedtls,
+# which are what everything here links -- and a monolithic libevent-2.2.so that
+# nothing links at all. Delete the monolith by glob rather than by literal
+# soversion: it was removed as libevent-2.2.so.1.0.0 until upstream went to
+# 1.0.1, after which 243KB of orphan rode into every image unnoticed and put
+# hi3516av300_neo 52KB past its 8192KB rootfs cap.
 define LIBEVENT_OPENIPC_DELETE_UNUSED
 	rm -f $(TARGET_DIR)/usr/lib/libevent-2.2.so*
 	rm -f $(TARGET_DIR)/usr/lib/libevent.so
@@ -51,6 +69,9 @@ else
 LIBEVENT_OPENIPC_CONF_OPTS += -DEVENT__DISABLE_MBEDTLS=ON
 endif
 
+# BROKEN_MMAP makes buffer.c issue syscall(SYS_mmap2,...) instead of the libc
+# mmap() that fails on 32-bit musl. SYS_mmap2 is 32-bit-ARM-only (aarch64 has
+# SYS_mmap), and aarch64 musl mmap() works fine, so only ask for it on 32-bit.
 ifeq ($(BR2_TOOLCHAIN_USES_MUSL),y)
 ifneq ($(BR2_aarch64),y)
 LIBEVENT_OPENIPC_CONF_OPTS += -DCMAKE_C_FLAGS="$(TARGET_CFLAGS) -DBROKEN_MMAP=1"
@@ -58,5 +79,19 @@ endif
 endif
 
 LIBEVENT_OPENIPC_POST_INSTALL_TARGET_HOOKS += LIBEVENT_OPENIPC_DELETE_UNUSED
+
+# The toolchains carry a libevent of their own, its libevent_mbedtls linked
+# against the mbedTLS they shipped; with per-package directories it can win
+# the staging merge over this one. Take it out when this package builds one.
+ifeq ($(BR2_PACKAGE_LIBEVENT_OPENIPC),y)
+define LIBEVENT_OPENIPC_DROP_TOOLCHAIN_COPY
+	rm -rf $(STAGING_DIR)/usr/include/event2 $(STAGING_DIR)/usr/lib/cmake/libevent
+	rm -f $(STAGING_DIR)/usr/include/evdns.h $(STAGING_DIR)/usr/include/event.h \
+		$(STAGING_DIR)/usr/include/evhttp.h $(STAGING_DIR)/usr/include/evrpc.h \
+		$(STAGING_DIR)/usr/include/evutil.h $(STAGING_DIR)/usr/lib/libevent* \
+		$(STAGING_DIR)/usr/lib/pkgconfig/libevent*.pc
+endef
+TOOLCHAIN_EXTERNAL_CUSTOM_POST_INSTALL_STAGING_HOOKS += LIBEVENT_OPENIPC_DROP_TOOLCHAIN_COPY
+endif
 
 $(eval $(cmake-package))

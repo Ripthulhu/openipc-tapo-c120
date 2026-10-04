@@ -3,7 +3,7 @@
 ## Alternative open firmware for your IP camera
 _(based on Buildroot)_
 
-[![Telegram](https://openipc.org/images/telegram_button.svg)][telegram]
+[![Telegram](https://raw.githubusercontent.com/OpenIPC/.github/refs/heads/main/assets/telegram-button.svg)][telegram]
 
 
 OpenIPC is a rapidly developing open source alternative [firmware][firmware] for 
@@ -58,22 +58,27 @@ is going to be the most stable, flexible, and open IP Network Camera Framework f
 
 You can make a financial contribution to the project at [Open Collective][contribution].
 
+Before your first patch, read [CLAUDE.md](CLAUDE.md) (also readable as `AGENTS.md`). It explains
+how the tree is put together, which changes belong in this repository and which belong in another
+one, and how to check your work — for you and for any AI assistant you code with. The review
+standards themselves are in [best_practices.md](best_practices.md).
+
 Thank you.
 
 <p align="center">
 <a href="https://opencollective.com/openipc/contribute/backer-14335/checkout" target="_blank"><img src="https://opencollective.com/webpack/donate/button@2x.png?color=blue" width="250" alt="Open Collective donate button"></a>
 </p>
 
-[chat]: https://openipc.org/our-channels
+[chat]: https://openipc.org/our-channels?ref=readme
 [contribution]: https://opencollective.com/openipc/contribute/backer-14335/checkout
 
 
 [firmware]: https://github.com/openipc/firmware
-[logo]: https://openipc.org/assets/openipc-logo-black.svg
+[logo]: https://raw.githubusercontent.com/OpenIPC/.github/refs/heads/main/assets/openipc-logo-black.svg
 [mit]: https://opensource.org/license/mit
 [opencollective]: https://opencollective.com/openipc
 [paypal]: https://www.paypal.com/donate/?hosted_button_id=C6F7UJLA58MBS
 [project]: https://github.com/openipc
-[telegram]: https://openipc.org/our-channels
-[website]: https://openipc.org
+[telegram]: https://openipc.org/our-channels?ref=readme
+[website]: https://openipc.org/?ref=readme
 [wiki]: https://github.com/openipc/wiki

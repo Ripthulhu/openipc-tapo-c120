@@ -7,14 +7,25 @@ This package is created and intended for unification and use in all firmware and
 
 #### Basic Example
 ```
-fw_setenv gpio_motors 'H1 H2 H3 H4 V1 V2 V3 V4'
+fw_setenv ptz_gpio 'H1 H2 H3 H4 V1 V2 V3 V4'
 ```
+`ptz_gpio` is the current name for the pin list; `gpio_motors`, used in the
+examples below and on cameras configured before the rename, keeps working as
+a fallback.
 First, the GPIOs responsible for Horizontal rotation are added, and next then the GPIOs responsible for Vertical rotation are added, a total of 8 characters.
 
 #### GK7205V200 (unknown model)
 ```
 fw_setenv gpio_motors '52 53 56 57 69 70 59 58'
 ```
+
+#### GK7205V510, NC-IPTC2200_DL (Goke gk7205v500 family)
+```
+fw_setenv gpio_motors '3 4 72 73 69 59 58 57'
+```
+Pan (roll) on GPIOs `3 4 72 73`, tilt (pitch) on GPIOs `69 59 58 57`, derived from the
+vendor `/proc/devcfg` motor map. If motion is rough or a phase is reversed, try the vendor
+coil order `[0,2,1,3]`: `fw_setenv gpio_motors '3 72 4 73 69 58 59 57'`.
 
 #### GM8136, Faleemi
 ```

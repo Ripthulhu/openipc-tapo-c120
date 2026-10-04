@@ -3,13 +3,107 @@ on:
   pull_request:
     branches:
       - master
-  schedule:
-    - cron: '30 22 * * *'
+    # The default set is opened/synchronize/reopened. The selector skips draft
+    # PRs, so without ready_for_review a PR opened as a draft would clear the
+    # draft flag with no event to build on and sit there unbuilt.
+    types: [opened, synchronize, reopened, ready_for_review]
+  # There is deliberately no `schedule:` here any more, and adding one back
+  # would undo a fix rather than restore a feature.
+  #
+  # This repository is the middle stage of a three-stage release train —
+  # widgetii/majestic publishes the majestic tarball, this builds the images,
+  # OpenIPC/builder builds from this tree afterwards. Each stage used to be its
+  # own GitHub cron guessing at the previous stage's finish time (17:25, 22:30,
+  # 03:00 UTC). From 2026-08-26 GitHub's dispatcher began delivering scheduled
+  # events hours late and independently per repo — this repo's slot measured
+  # +4h55m, +7h42m and +5h16m on successive nights — which put the train out of
+  # order: on the 08-28 cycle builder ran first, then majestic, then this. Every
+  # run was green, because no stage checks that its inputs are newer than the
+  # ones it used last time.
+  #
+  # The diagnostic, if this is ever doubted: on every late run
+  # `created_at == run_started_at` to the second, so the delay was entirely
+  # upstream of run creation, inside GitHub's dispatcher rather than in any
+  # runner pool, concurrency group or matrix.
+  #
+  # The ordering now lives on the machine that runs majestic's self-hosted
+  # runners, which dispatches each stage and waits for it before starting the
+  # next. See widgetii/majestic docs/ci-runners.md.
   workflow_dispatch:
+    inputs:
+      # Set by that release trigger, and by nothing else. It is the difference
+      # between "the nightly is running" and "a person asked for a build": the
+      # nightly may find nothing changed and skip, whereas someone dispatching
+      # by hand wants the build they asked for. See the preflight gate below.
+      nightly:
+        description: 'Run as the nightly release (skip when nothing changed)'
+        type: boolean
+        default: false
+
+# Cancel a PR's earlier run when a new commit lands on it. The matrix is ~96
+# jobs and there was no group here, so every push started another full matrix
+# beside the one already running and both went to completion. Scheduled and
+# dispatched runs are deliberately left alone: they write releases, and a
+# cancelled publish leaves the nightly half-uploaded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which boards can this change actually reach? Nearly every change here lands
+  # in one SoC family, and the matrix was a fixed list, so a one-line fix to a
+  # load script that reaches three cameras also rebuilt SigmaStar, Ingenic,
+  # Rockchip and Xiongmai.
+  #
+  # The narrowing happens HERE, in a job that always runs -- never in a `paths:`
+  # filter on the trigger. A filtered-out workflow does not run at all, so the
+  # required "CI Gate" check would stay pending forever and the PR could never
+  # be merged.
+  select:
+    name: Select boards
+    # Same guard as preflight below.
+    if: >-
+      github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private)
+    runs-on: ubuntu-latest
+    outputs:
+      matrix:      ${{ steps.pick.outputs.matrix }}
+      needs-build: ${{ steps.pick.outputs.needs-build }}
+    steps:
+      - uses: actions/checkout@v4
+      # Fails the PR that makes the selector disagree with the tree, rather
+      # than letting a package quietly fall out of the matrix.
+      - name: Check the selector still describes the tree
+        run: python3 .github/scripts/ci-matrix.py --self-test
+      - id: pick
+        name: Pick the affected boards
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/ci-matrix.py
+
   preflight:
     name: Preflight
+    # Guard rail for clones of this repo. A clone pushed to a new repository
+    # (a private mirror, an internal re-host) inherits this file, and the full
+    # platform matrix — ~2000 runner-minutes a pass — then runs on that owner's
+    # Actions bill on every internal PR they open.
+    #
+    # This used to also have to cover an inherited `cron:`, which fired
+    # unattended and nightly on whoever's bill; that half is gone with the
+    # schedule trigger. The PR half is not, so the guard stays.
+    #
+    # The line is drawn where the minutes stop being free:
+    #   - canonical repo: everything runs, unchanged
+    #   - workflow_dispatch: an operator explicitly asked; runs anywhere
+    #   - pull_request on a PUBLIC repo: free minutes (contributor PRs here
+    #     run in this repo's context; within-fork PRs are public by
+    #     construction) — runs
+    #   - anything unattended or billed on a non-canonical repo — skips
+    if: >-
+      github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private)
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.gate.outputs.should_build }}
@@ -17,6 +111,7 @@ jobs:
       short_sha:    ${{ steps.gate.outputs.short_sha }}
       build_id:     ${{ steps.gate.outputs.build_id }}
       built_at:     ${{ steps.gate.outputs.built_at }}
+      webui_digest: ${{ steps.gate.outputs.webui_digest }}
     steps:
       - uses: actions/checkout@v4
       - id: gate
@@ -27,24 +122,150 @@ jobs:
           SHORT=$(git rev-parse --short HEAD)
           BUILD_ID="nightly-$(date -u +%Y%m%d)-${SHORT}"
           BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          PREV=$(gh release view nightly --json body -q .body 2>/dev/null \
-                  | sed -n 's/^sha=//p' | head -1 || true)
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$PREV" = "$HEAD" ]; then
-            echo "Skip: HEAD ($HEAD) already published as the latest nightly."
+          NOTES_PREV=$(gh release view nightly --json body -q .body 2>/dev/null || true)
+          PREV=$(printf '%s\n' "$NOTES_PREV" | sed -n 's/^sha=//p' | head -1)
+          PREV_WEBUI=$(printf '%s\n' "$NOTES_PREV" | sed -n 's/^webui=//p' | head -1)
+
+          # majestic-webui ships as a rolling `dist` release asset, so a WebUI fix
+          # changes what the nightly would contain without ever moving this repo's
+          # HEAD — on a quiet firmware tree the nightly would skip forever and the
+          # fix would never reach an image. Compare the asset's content digest as
+          # well. It is content-addressed, so a re-upload of identical bytes does
+          # not force a pointless rebuild. An empty value (API hiccup, or an asset
+          # with no digest) falls through to building: stale is worse than spare.
+          WEBUI=$(gh api repos/OpenIPC/majestic-webui/releases/tags/dist \
+                    --jq '.assets[]|select(.name=="majestic-webui-dist.tar.gz")|.digest // empty' \
+                    2>/dev/null || true)
+
+          # Both branches echo the rendered `nightly` value. The gate compares
+          # a boolean dispatch input against the literal string "true", and
+          # nothing else in this repo compares an *input* that way — every
+          # other `= "true"` here tests a job output, which is a string
+          # already. If the rendering were ever not lowercase `true` the gate
+          # would simply never skip: a full ~2000-runner-minute matrix every
+          # night, green, with nothing to show it had stopped working. Logging
+          # what the gate actually saw is what makes that visible in one line.
+          #
+          # Keyed on the `nightly` input rather than on the event name. It
+          # used to read `event_name = schedule`, and when the schedule was
+          # replaced by a dispatch that condition silently became unreachable —
+          # which would have rebuilt the whole ~2000-runner-minute matrix every
+          # night regardless of whether anything had changed, and gone green
+          # doing it. A hand dispatch still leaves this false and still builds.
+          if [ "${{ inputs.nightly }}" = "true" ] && [ "$PREV" = "$HEAD" ] \
+             && [ -n "$WEBUI" ] && [ "$PREV_WEBUI" = "$WEBUI" ]; then
+            echo "Skip: HEAD ($HEAD) already published as the latest nightly, majestic-webui dist unchanged ($WEBUI). (nightly=${{ inputs.nightly }})"
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Build: $BUILD_ID (event=${{ github.event_name }}, prev=$PREV)"
+            echo "Build: $BUILD_ID (event=${{ github.event_name }}, nightly=${{ inputs.nightly }}, prev=$PREV, webui=$WEBUI, prev_webui=$PREV_WEBUI)"
             echo "should_build=true"  >> "$GITHUB_OUTPUT"
           fi
           echo "head_sha=$HEAD"   >> "$GITHUB_OUTPUT"
           echo "short_sha=$SHORT" >> "$GITHUB_OUTPUT"
           echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
           echo "built_at=$BUILT_AT" >> "$GITHUB_OUTPUT"
+          echo "webui_digest=$WEBUI" >> "$GITHUB_OUTPUT"
+
+      # Prove the release credential BEFORE the matrix runs.
+      #
+      # On 2026-08-29, run 33273333359 built all 102 boards over two hours and
+      # then died in `Publish releases` with "403 Resource not accessible by
+      # integration". Nothing earlier had any opinion about whether the run
+      # could publish, so the price of that misconfiguration was the entire
+      # matrix, and a night of cameras finding no new firmware behind the
+      # `latest` tag. The failure was invisible until the last job of the run.
+      #
+      # A draft release is not visible to anyone and creates no tag, so this
+      # costs a couple of API calls and turns a two-hour failure into a
+      # ten-second one. Checking the secret is merely non-empty would not have
+      # caught that incident at all: the old token existed and was simply
+      # refused, so the probe has to attempt the write.
+      #
+      # Three details keep the probe from becoming a problem of its own:
+      #
+      #   - The tag carries run_attempt as well as run_id. run_id is stable
+      #     across re-runs, so without the attempt a leftover draft from a
+      #     failed run would collide with its own re-run and report a valid
+      #     credential as broken -- a guard that fails wrongly is worse than no
+      #     guard, because it blocks good runs.
+      #   - Deletion happens from a trap, so an interrupted or cancelled job
+      #     still cleans up rather than leaving the draft behind.
+      #   - A best-effort sweep removes probe drafts stranded by earlier runs,
+      #     because cleanup.yml does not know this tag pattern. It is capped at
+      #     the 10 most recent releases and every failure is swallowed: listing
+      #     100 releases here returns HTTP 504 (each carries hundreds of
+      #     assets), and a housekeeping step must never be what fails a build.
+      #
+      # Skipped on pull_request, which neither publishes nor has the secret.
+      - name: Prove the release credential can write
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PROBE_TAG: ci-release-credential-probe-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::RELEASE_TOKEN is not set. The matrix would build for"\
+                 "two hours and then fail to publish. See the publish job."
+            exit 1
+          fi
+
+          probe_id=""
+          cleanup() {
+            [ -n "$probe_id" ] || return 0
+            gh api -X DELETE "repos/${GH_REPO}/releases/${probe_id}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          # Strand-clearing, entirely best effort.
+          gh api "repos/${GH_REPO}/releases?per_page=10" \
+            --jq '.[] | select(.draft and (.tag_name | startswith("ci-release-credential-probe-"))) | .id' \
+            2>/dev/null | while read -r stale; do
+              # gh writes its error body to STDOUT, so a failed list feeds this
+              # loop lines of JSON rather than ids. Deleting them is harmless --
+              # the calls just fail -- but logging "removing stranded probe
+              # draft {"status": "401"}" is a confident lie in the log of a step
+              # whose whole job is to be believed. Only act on real ids.
+              case "$stale" in ''|*[!0-9]*) continue ;; esac
+              echo "removing stranded probe draft $stale"
+              gh api -X DELETE "repos/${GH_REPO}/releases/${stale}" >/dev/null 2>&1 || true
+            done || true
+
+          # Retried, because a one-shot POST cannot tell a bad credential from
+          # a bad minute. GitHub answers 403 for secondary rate limiting as
+          # well as for refusal -- the publish step below retries six times for
+          # exactly that reason -- and these repos return 504 on ordinary
+          # release listings often enough to have been seen while writing this.
+          # Reporting a blip as "the token is wrong" would send whoever reads
+          # it to reissue a credential that was never the problem.
+          #
+          # Three attempts rather than the publish step's six: the value here is
+          # failing fast, and 5s + 10s of backoff still absorbs a transient
+          # while keeping a genuine misconfiguration well under a minute.
+          attempt=0
+          until probe_id=$(gh api -X POST "repos/${GH_REPO}/releases" \
+                             -f tag_name="$PROBE_TAG" -f name="$PROBE_TAG" \
+                             -F draft=true --jq .id); do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 3 ]; then
+              echo "::error::RELEASE_TOKEN could not create a release in"\
+                   "${GH_REPO} after 3 attempts. If this is not a transient API"\
+                   "error, the token needs Contents: read and write."
+              exit 1
+            fi
+            echo "attempt ${attempt} failed, retrying in $((attempt * 5))s"
+            sleep $((attempt * 5))
+          done
+          echo "release credential OK"
 
   buildroot:
     name: Firmware
-    needs: preflight
-    if: needs.preflight.outputs.should_build == 'true'
+    needs: [preflight, select]
+    if: >-
+      needs.preflight.outputs.should_build == 'true' &&
+      needs.select.outputs.needs-build == 'true'
     runs-on: ubuntu-latest
     env:
       BUILD_ID:  ${{ needs.preflight.outputs.build_id }}
@@ -52,165 +273,9 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        platform:
-          # Sigmastar [I6]
-          - ssc325_lite
-          - ssc325de_lite
-
-          # Sigmastar [I6B]
-          - ssc333_lite
-          - ssc335_lite
-          - ssc335de_lite
-          - ssc337_lite
-          - ssc337de_lite
-
-          # Sigmastar [I6C]
-          - ssc377_lite
-          - ssc377d_lite
-          - ssc377de_lite
-          - ssc377qe_lite
-          - ssc378de_lite
-          - ssc378qe_lite
-
-          # Sigmastar [I6E]
-          - ssc30kd_lite
-          - ssc30kq_lite
-          - ssc338q_lite
-
-          # Ingenic [T21]
-          - t10_lite
-          - t20_lite
-          - t21_lite
-          - t30_lite
-
-          # Ingenic [T23]
-          - t23_lite
-
-          # Ingenic [T31]
-          - t31_lite
-
-          # Ingenic [T40]
-          - t40_lite
-
-          # Hisilicon [HI3516AV100]
-          - hi3516av100_lite
-          - hi3516av100_neo
-          - hi3516dv100_lite
-
-          # Hisilicon [HI3516CV100]
-          - hi3516cv100_lite
-          - hi3516cv100_neo
-          - hi3518cv100_lite
-          - hi3518ev100_lite
-
-          # Hisilicon [HI3516CV200]
-          - hi3516cv200_lite
-          - hi3516cv200_neo
-          - hi3518ev200_lite
-
-          # Hisilicon [HI3516CV300]
-          - hi3516cv300_lite
-          - hi3516cv300_neo
-          - hi3516ev100_lite
-
-          # Hisilicon [HI3516CV500]
-          - hi3516av300_lite
-          - hi3516av300_neo
-          - hi3516cv500_lite
-          - hi3516dv300_lite
-
-          # Hisilicon [HI3516CV6XX]
-          - hi3516cv6xx_ultimate
-
-          # Hisilicon [HI3516EV200]
-          - hi3516dv200_lite
-          - hi3516ev200_lite
-          - hi3516ev300_lite
-          - hi3518ev300_lite
-          - hi3516ev300_neo
-
-          # Hisilicon [HI3519V101]
-          - hi3516av200_lite
-          - hi3516av200_neo
-          - hi3519v101_lite
-
-          # Hisilicon [HI3520DV200]
-          - hi3520dv200_lite
-
-          # Hisilicon [HI3536CV100]
-          - hi3536cv100_lite
-
-          # Hisilicon [HI3536DV100]
-          - hi3536dv100_lite
-
-          # Goke [GK710X]
-          - gk7102_lite
-          - gk7102s_lite
-
-          # Goke [GK7205V200]
-          - gk7202v300_lite
-          - gk7205v200_lite
-          # gk7205v210 is firmware-identical to gk7205v200 — built once and
-          # served via gk7205v200's BR2_OPENIPC_SOC_ALIASES (manifest @alias).
-          - gk7205v300_lite
-          - gk7605v100_lite
-
-          # Goke [GK7205V500]
-          - gk7205v500_lite
-
-          # Allwinner
-          - v851s_lite
-
-          # Fullhan
-          - fh8852v100_lite
-          - fh8852v200_lite
-
-          # Grainmedia
-          - gm8135_lite
-          - gm8136_lite
-
-          # Novatek
-          - nt98562_lite
-          - nt98566_lite
-
-          # Rockchip
-          - rv1103_lite
-          - rv1106_lite
-          - rv1109_lite
-          - rv1126_lite
-
-          # Xiongmai
-          - xm510_lite
-          - xm530_lite
-          # xm550 is firmware-identical to xm530 — built once and served via
-          # xm530's BR2_OPENIPC_SOC_ALIASES (manifest @alias).
-
-          # Ultimate
-          - ssc333_ultimate
-          - ssc335_ultimate
-          - ssc335de_ultimate
-          - ssc337_ultimate
-          - ssc337de_ultimate
-          - ssc30kd_ultimate
-          - ssc30kq_ultimate
-          - ssc338q_ultimate
-          - t20_ultimate
-          - t21_ultimate
-          - t31_ultimate
-          - t40_ultimate
-          - hi3516av100_ultimate
-          - hi3516dv100_ultimate
-          - hi3518ev200_ultimate
-          - hi3516cv300_ultimate
-          - hi3516ev200_ultimate
-          - hi3516ev300_ultimate
-          - hi3518ev300_ultimate
-          - hi3516av200_ultimate
-          - gk7202v300_ultimate
-          - gk7205v200_ultimate
-          - gk7205v300_ultimate
-
+      # The board list lives in .github/scripts/ci-matrix.py, which is also
+      # what narrows it. Everything except pull_request gets all of it.
+      matrix: ${{ fromJson(needs.select.outputs.matrix) }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -219,6 +284,22 @@ jobs:
         run: |
           echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
           echo CACHE_DATE=$(date +%m) >> ${GITHUB_ENV}
+          # The dl cache below and the refresh step after it both work on
+          # output/dl. Buildroot did not: DL_DIR defaults to $(TOPDIR)/dl, and
+          # TOPDIR is the source tree the Makefile hands to -C, so downloads
+          # landed in output/buildroot-$(BR_VER)/dl and output/dl never existed.
+          # actions/cache only archives paths that exist, so nothing was ever
+          # saved and nothing ever restored; the refresh find matched nothing.
+          # Both failures were silent, and they cancelled out to "every board
+          # re-downloads every tarball, every run" -- which is also why CI
+          # escaped the stale-tarball trap that bit local builds in #2352.
+          #
+          # Point buildroot at the directory the cache keys on. Buildroot reads
+          # BR2_DL_DIR from the environment ahead of .config, by design ("To
+          # make sure that the environment variable overrides the .config
+          # option, set this before including .config"), and the Makefile's own
+          # expiry from #2352 already prefers $(BR2_DL_DIR) when it is set.
+          echo "BR2_DL_DIR=${GITHUB_WORKSPACE}/output/dl" >> ${GITHUB_ENV}
 
       - name: Setup ccache
         if: github.event_name != 'pull_request'
@@ -250,13 +331,169 @@ jobs:
           key: dl-${{env.CACHE_DATE}}
           restore-keys: dl-
 
+      - name: Refresh moving-ref package downloads
+        run: |
+          # Packages pinned to a moving ref keep a constant download filename. The dl
+          # cache key is the month (date +%m) and actions/cache only saves on a key
+          # miss, so that snapshot is frozen for weeks; buildroot then keeps reusing the
+          # stale tarball and the nightly silently ships an old version. This is what
+          # desynced majestic-webui from majestic (blanking settings labels; later a t31
+          # lite image shipped a pre-x-groups majestic vs the current webui — "No
+          # settings groups in schema"). Drop both naming forms so buildroot re-fetches:
+          #   - dash:  <pkg>-<ref>.tar.gz   e.g. majestic-webui-dist.tar.gz
+          #   - dot:   <pkg>.<ref>.tar.bz2  e.g. majestic.t31.lite.master.tar.bz2
+          # The dot form is majestic's S3 tarball — it LOOKS S3-pinned but is a moving
+          # `master` build re-uploaded every majestic CI run, with no .hash to force a
+          # refetch. Only genuinely content-addressed tarballs (semver / SHA) keep cache.
+          #
+          # Not silenced. `2>/dev/null || true` is how this step reported
+          # nothing for months while pointed at a directory that did not exist;
+          # a cold cache is a legitimate state and now says so out loud, and
+          # anything else is a real error that reaches the log.
+          if [ -d "${BR2_DL_DIR}" ]; then
+            find "${BR2_DL_DIR}" -type f -regextype posix-extended \
+              -regex '.*[-.](HEAD|master|main|dist)\.tar\.(gz|bz2|xz)' \
+              -print -delete
+            # And the kernel, which the pattern above cannot see. Every board
+            # fetches it from openipc/linux/archive/<branch>.tar.gz -- 122 of the
+            # defconfigs -- so the filename is the BRANCH name, hisilicon-hi3516cv500
+            # .tar.gz or ingenic-t31.tar.gz. That is a moving ref with a constant
+            # name and no .hash, exactly the case this step exists for, but it
+            # ends in none of the four words above. A kernel fix merged today
+            # would otherwise wait for the monthly cache key to roll over before
+            # any nightly built it. Buildroot keeps custom kernel tarballs in the
+            # package's own dl subdirectory, so this reaches them and nothing else.
+            if [ -d "${BR2_DL_DIR}/linux" ]; then
+              find "${BR2_DL_DIR}/linux" -maxdepth 1 -type f -name '*.tar.gz' \
+                -print -delete
+            else
+              echo "no kernel archive cached yet -- nothing to refresh."
+            fi
+          else
+            echo "dl cache is cold (${BR2_DL_DIR} absent) -- nothing to refresh."
+          fi
+
       - name: Build firmware
-        run: bash .github/scripts/build_firmware.sh "${{matrix.platform}}"
+        run: |
+          export GIT_HASH=$(git rev-parse --short ${GITHUB_SHA})
+          export GIT_BRANCH=${GITHUB_REF_NAME}
+          echo GIT_HASH=${GIT_HASH} >> ${GITHUB_ENV}
+          echo GIT_BRANCH=${GIT_BRANCH} >> ${GITHUB_ENV}
+
+          mkdir -p /tmp/ccache
+          ln -s /tmp/ccache ${HOME}/.ccache
+
+          # Backoffs give 7 attempts total. The longer tail (600, 1200) covers
+          # the GitHub releases CDN / toolchain mirror flakes that took down
+          # hi3516av100_ultimate on 2026-05-20 (run 26196546684) — 502s
+          # storming for >10 min outlasted the previous 30/60/120/300 budget.
+          #
+          # Those backoffs are a bet that the failure is a flake. An image that
+          # does not fit its partition is not one: it will not fit on the sixth
+          # try either. hi3519v101_lite spent 50 minutes proving that on
+          # 2026-08-18 (run 32138368965 — 4KB over a 5120KB cap), 38.5 of them
+          # asleep, and the verdict landed at 14:39 for a PR that had been
+          # merged at 13:14. The budget did not only waste an hour of runner
+          # time, it pushed the answer past the point where anyone was still
+          # looking at it. Deterministic failures stop on the first attempt.
+          backoffs="30 60 120 300 600 1200"
+          attempt=1
+          buildlog=$(mktemp)
+
+          # Name what broke, in a form the summariser can group on. Buildroot
+          # says which package and which phase in exactly one line and nowhere
+          # else:
+          #   make[1]: *** [package/pkg-generic.mk:374: .../majestic-webui-dist/.stamp_target_installed] Error 1
+          # The phase IS the class: .stamp_downloaded is a mirror or a 404 (the
+          # #2036 family), anything after it is real code. The build directory
+          # is <pkg>-<version> and splitting that back apart is ambiguous
+          # (majestic-webui-dist), so it is reported whole.
+          #
+          # Without this an annotation says only "build failed", which is what
+          # made 2026-08-12 (run 31649720825) cost 94 opened job logs to learn
+          # that all 94 boards said the same thing. Last match wins: on a retry
+          # the log holds every attempt, and the one that decided the outcome
+          # is the last. Falls back to this repo's own Makefile target, which
+          # is where repack and CHECK_SIZE fail.
+          classify_failure() { # <logfile>
+            local cause
+            cause=$(sed -n \
+              's|.*\*\*\* \[[^]]*: .*/build/\([^/]*\)/\.stamp_\([a-z_]*\)\].*|\1/\2|p' \
+              "$1" | tail -1)
+            if [ -z "$cause" ]; then
+              cause=$(sed -n 's|^make[^:]*: \*\*\* \[\([^]]*\)\].*|\1|p' "$1" | tail -1)
+            fi
+            echo "${cause:-unclassified}"
+          }
+          for sleep_for in $backoffs ""; do
+            # `set +e` around the pipeline, not because the default shell needs
+            # it -- runner logs show `bash -e {0}`, errexit without pipefail, so
+            # this pipeline reports tee's zero and never trips errexit -- but
+            # because that is one `defaults: run: shell: bash` away from being
+            # untrue. Under pipefail a failing make would abort the step right
+            # here, and the whole retry budget below would silently stop
+            # existing. PIPESTATUS[0] is make's own status either way.
+            set +e
+            make BOARD=${{matrix.platform}} 2>&1 | tee "${buildlog}"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "${rc}" -eq 0 ]; then break; fi
+
+            # CHECK_SIZE in the Makefile prints this, and only this, when an
+            # image is larger than the partition it has to live in.
+            if grep -q -- '-- size exceeded by:' "${buildlog}"; then
+              echo "::error::${{matrix.platform}}: $(grep -m1 -o -- '-- size exceeded by:.*' "${buildlog}") — the image does not fit its partition, which retrying cannot change"
+              exit 1
+            fi
+
+            cause=$(classify_failure "${buildlog}")
+            if [ -z "$sleep_for" ]; then
+              echo "::error::${{matrix.platform}}: build failed after ${attempt} attempts — ${cause}"
+              exit 1
+            fi
+            # Named even on a retry that goes on to succeed. A flake the backoff
+            # absorbs is invisible in a green run, and it is the thing that
+            # predicts the nightly going red again -- the Build summary job
+            # counts these warnings to report it.
+            echo "::warning::${{matrix.platform}}: attempt ${attempt} failed (${cause}), retrying after ${sleep_for}s"
+            sleep "$sleep_for"
+            attempt=$((attempt + 1))
+          done
+
+          # Fitting with almost nothing to spare is the state this guard exists
+          # for, and it looks exactly like fitting comfortably in a green run.
+          # Promote the Makefile's line to an annotation so it outlives the log.
+          # `|| true` because finding nothing here is the good outcome, and a
+          # grep that matches nothing exits 1. Harmless under the current
+          # `bash -e {0}` (the pipeline takes the while loop's zero), fatal the
+          # day anything turns pipefail on -- every comfortably-sized board
+          # would fail its build for having nothing to warn about.
+          grep -- '-- headroom warning:' "${buildlog}" | while IFS= read -r line; do
+            echo "::warning::${{matrix.platform}}: ${line#-- headroom warning: }"
+          done || true
+          rm -f "${buildlog}"
+
+          TIME=$(date -d @${SECONDS} +%M:%S)
+          echo TIME=${TIME} >> ${GITHUB_ENV}
+
+          NORFW=$(find output/images -name openipc*nor*)
+          if [ -e ${NORFW} ]; then
+            echo NORFW=${NORFW} >> ${GITHUB_ENV}
+          fi
+
+          NANDFW=$(find output/images -name openipc*nand*)
+          if [ -e ${NANDFW} ]; then
+            echo NANDFW=${NANDFW} >> ${GITHUB_ENV}
+          fi
 
       - name: Verify kernel modules
         run: sh .github/scripts/check_target_modules.sh
 
+      # Both reports feed "Upload build artifacts" below, which never runs on a
+      # pull_request -- so on a PR they were computed once per board and then
+      # dropped on the floor, kconfiglib install and all.
       - name: Build size report
+        if: github.event_name != 'pull_request'
         run: |
           make BOARD=${{matrix.platform}} size-report || \
             echo "::warning::size-report failed for ${{matrix.platform}}"
@@ -266,6 +503,7 @@ jobs:
           fi
 
       - name: Build kconfig graph
+        if: github.event_name != 'pull_request'
         run: |
           python3 -m pip install --user --break-system-packages kconfiglib || \
             { echo "::warning::kconfiglib install failed for ${{matrix.platform}}"; exit 0; }
@@ -276,26 +514,110 @@ jobs:
           if [ -e "$KCONFIG" ]; then echo "KCONFIG=$KCONFIG" >> ${GITHUB_ENV}; fi
           if [ -e "$KHELP" ]; then echo "KHELP=$KHELP" >> ${GITHUB_ENV}; fi
 
-      # Hand the firmware + sidecars to the single `publish` job instead of
-      # uploading to releases from here. ~90 matrix jobs all deleting and
+      # The size report and kconfig graph, for the `report` job that pushes
+      # them to openipc.org. An artifact of their own, a few tens of KB, kept a
+      # week -- unlike the images below, which are kept a day because publish
+      # consumes them within the run -- so a report that could not be pushed
+      # can be re-run days later. Both reports are optional, so is this.
+      - name: Upload reports
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: reports-${{ matrix.platform }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            output/images/sizes.*.json
+            output/images/kconfig-graph.*.json
+            output/images/kconfig-help.*.json
+
+      # Hand the firmware to the single `publish` job instead of uploading to
+      # releases from here. ~90 matrix jobs all deleting and
       # re-uploading assets on the SAME shared `nightly`/`latest` releases at
       # once made the GitHub releases API return HTTP 500 ("Server Error") —
       # e.g. run 27108181857, where every build succeeded but 14 jobs went red
       # in their upload step. Consolidating every release write into one job
       # removes the concurrent-writer contention.
+      #
+      # It also makes this the only post-build step whose failure costs
+      # anything, because it is the only one something downstream reads.
+      # `size-report`, `kconfig-graph` and the Telegram call below all degrade
+      # to a warning; this upload IS the board's handoff to `publish`, so a
+      # board whose artifact never arrives keeps its PREVIOUS image on
+      # `nightly` and `latest` (#2303) while every other board moves on. It
+      # therefore has to keep failing the job — but it had no reason to fail
+      # it for one dropped packet, which is what the retry below fixes.
+      #
+      # On 2026-09-22 (run 35761639634) gk7205v200_ultimate built clean —
+      # 1876KB/2048KB kernel, 6656KB/8192KB rootfs, modules verified — and
+      # then died here with `getaddrinfo EAI_AGAIN` against
+      # productionresultssa2.blob.core.windows.net: a runner DNS blip talking
+      # to Azure blob storage. One board shipped a day-old image and the
+      # nightly went red 99/100. The build step gets 7 attempts over ~38
+      # minutes (#2036); this one got a single shot, the same asymmetry that
+      # made a lost Telegram packet fail a run before #2351.
       - name: Upload build artifacts
+        id: upload
         if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: fw-${{ matrix.platform }}
+          if-no-files-found: ignore
+          retention-days: 1
+          path: output/images/openipc*.tgz
+
+      # A pause, not an immediate retry: EAI_AGAIN is a resolver that has not
+      # answered yet, and asking it again in the same second asks the same
+      # unanswered question.
+      - name: Pause before retrying the upload
+        if: github.event_name != 'pull_request' && steps.upload.outcome == 'failure'
+        run: |
+          echo "::warning::${{matrix.platform}}: artifact upload failed, retrying in 60s"
+          sleep 60
+
+      # One retry, and it is allowed to fail the job. The first attempt
+      # absorbed the blip class; a second failure is no longer a blip, and
+      # `publish` and the gate both need to see that this board did not
+      # deliver rather than find out from a stale release asset.
+      #
+      # `overwrite` because a first attempt that dies mid-upload has already
+      # claimed the artifact name, and v4 refuses a duplicate.
+      - name: Upload build artifacts (retry)
+        if: github.event_name != 'pull_request' && steps.upload.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: fw-${{ matrix.platform }}
           if-no-files-found: ignore
           retention-days: 1
-          path: |
-            output/images/openipc*.tgz
-            output/images/sizes.*.json
-            output/images/kconfig-graph.*.json
-            output/images/kconfig-help.*.json
+          overwrite: true
+          path: output/images/openipc*.tgz
 
+      # A Telegram notification, and nothing else. The image it announces was
+      # handed to the `publish` job by the step above, so whether this call
+      # lands has no bearing on what the nightly ships.
+      #
+      # It could nonetheless fail the whole run, and did. On 2026-08-31 the
+      # gk7202v300_ultimate job died here with curl exit 55 (CURLE_SEND_ERROR,
+      # a transient failure sending the body) under the default `bash -e`,
+      # turning a run that was 99/100 green red. Since #2334 a run's conclusion
+      # gates the release train on the runner host, which dispatches this
+      # workflow, waits for it, and only advances to OpenIPC/builder if it
+      # succeeded -- so one dropped packet to api.telegram.org also cost
+      # builder its entire nightly, and the train does not retry before the
+      # next slot.
+      #
+      # Two things change, because the old line failed on the wrong event. It
+      # died on a transport error, and it ignored an application one: curl
+      # exits 0 for any request that completes, so a 4xx or 5xx from Telegram
+      # printed itself and passed. Now both are retried, and neither can fail
+      # the job. An unsent notification is worth a warning annotation; it is
+      # never worth a red build, still less a lost fleet-wide nightly.
+      #
+      # --max-time bounds each attempt: without it a stalled upload holds the
+      # job open until the job timeout, which is the one failure mode a retry
+      # loop cannot get out of by itself.
       - name: Send binary
         if: github.event_name != 'pull_request' && env.NORFW
         run: |
@@ -304,8 +626,20 @@ jobs:
           TG_HEADER=$(echo -e ${TG_MSG}${TG_ICON})
           TG_TOKEN=${{secrets.TELEGRAM_TOKEN_BOT_OPENIPC}}
           TG_CHANNEL=${{secrets.TELEGRAM_CHANNEL_OPENIPC_DEV}}
-          HTTP=$(curl -s -o /dev/null -w %{http_code} https://api.telegram.org/bot${TG_TOKEN}/sendDocument -F chat_id=${TG_CHANNEL} -F caption="${TG_HEADER}" -F document=@${NORFW})
-          echo Telegram response: ${HTTP}
+          for attempt in 1 2 3; do
+            if [ "${attempt}" -gt 1 ]; then sleep $(( (attempt - 1) * 15 )); fi
+            # `|| HTTP=...` is what keeps a non-zero curl from ending the step
+            # under `bash -e`; $? there is curl's own exit code, so the log
+            # says which transport error it was rather than just "failed".
+            HTTP=$(curl -s -o /dev/null -w %{http_code} --max-time 300 \
+                     "https://api.telegram.org/bot${TG_TOKEN}/sendDocument" \
+                     -F chat_id="${TG_CHANNEL}" \
+                     -F caption="${TG_HEADER}" \
+                     -F document=@"${NORFW}") || HTTP="curl-exit-$?"
+            echo "Telegram response (attempt ${attempt}/3): ${HTTP}"
+            case "${HTTP}" in 2??) exit 0 ;; esac
+          done
+          echo "::warning::Telegram upload of ${NORFW} failed after 3 attempts (last result: ${HTTP}). The image itself is unaffected -- it went to the publish job in the previous step."
 
   # All release writes happen here, once, so only a SINGLE job ever touches the
   # shared `nightly`/`latest` releases (and the per-run dated release). The old
@@ -316,11 +650,27 @@ jobs:
   #
   # Best-effort by design: publish whatever boards produced, even if some
   # failed (matches enrich_manifest.py, which indexes whatever assets exist).
-  # Never runs on PRs (no artifacts) or on a scheduled no-op (buildroot skipped).
+  # Never runs on PRs (no artifacts) or on a nightly no-op (buildroot skipped).
   publish:
     name: Publish releases
     needs: [preflight, buildroot]
+    # The leading status function is load-bearing. A job whose `needs` failed is
+    # skipped by default, and an `if:` lifts that only when it CONTAINS a status
+    # function -- reading `needs.buildroot.result` inside the `contains()` below
+    # does not count. So from #2184, which moved the release writes out of the
+    # matrix jobs and into this one, until this line, any single failing board
+    # skipped this job outright and the whole fleet's nightly went unwritten:
+    # the 2026-08-23 nightly lost all 113 images to one board 4KB over its size
+    # cap, and 2026-08-12 lost them the same way. Before #2184 each board
+    # uploaded from its own matrix job, so a bad board took down only itself;
+    # this restores that property without giving up the single-writer fix.
+    #
+    # `!cancelled()` rather than `always()`: the `contains()` already drops a
+    # cancelled or skipped matrix, but a run cancelled AFTER a green matrix
+    # would still start uploading under `always()`, and a half-written nightly
+    # is the thing this job exists to avoid.
     if: >-
+      !cancelled() &&
       github.event_name != 'pull_request' &&
       needs.preflight.outputs.should_build == 'true' &&
       contains(fromJSON('["success", "failure"]'), needs.buildroot.result)
@@ -328,7 +678,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      # continue-on-error only so that a matrix where every board failed --
+      # and therefore uploaded no fw-* artifact at all -- does not hard-fail
+      # here before the gate can report why. Collect below turns that back
+      # into a failure for every other case; without it, a broken download
+      # produced an empty dist/, the count guard skipped publishing, and the
+      # nightly went green having published nothing. Found by review on
+      # OpenIPC/builder#121, whose publish job this one seeded.
       - name: Download build artifacts
+        id: download
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -340,10 +698,36 @@ jobs:
         id: collect
         run: |
           mkdir -p dist
-          count=$(find dist -type f | wc -l)
+          # tr because wc pads its output on some platforms (BSD does, the
+          # GNU coreutils on the runner does not) and a padded "     0" would
+          # read as non-empty to the `!= '0'` guard below.
+          count=$(find dist -type f | wc -l | tr -d '[:space:]')
           echo "Collected ${count} asset(s):"
           ls -la dist || true
           echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+          # A matrix that went green must have produced artifacts. Zero assets
+          # after that means the download failed, not that there was nothing
+          # to publish.
+          if [ "${{ needs.buildroot.result }}" = "success" ]; then
+            if [ "${{ steps.download.outcome }}" != "success" ]; then
+              echo "::error::artifact download failed after a fully successful matrix"
+              exit 1
+            fi
+            if [ "${count}" -eq 0 ]; then
+              echo "::error::no artifacts collected although every board built"
+              exit 1
+            fi
+          elif [ "${count}" -eq 0 ]; then
+            echo "::notice::matrix failed and produced nothing; no release to write"
+          else
+            # The partial case this job was always meant to serve, unreachable
+            # until the `!cancelled()` above. Say so out loud: the boards that
+            # did not build keep their PREVIOUS image on nightly/latest, which
+            # is the right outcome for a flasher but is invisible next to the
+            # freshly-written ones.
+            echo "::warning::partial publish: matrix failed, writing the ${count} asset(s) that did build; nightly and latest keep their previous image for every board that did not build — see the Build summary job for the per-board breakdown"
+          fi
 
       # Drive the release writes ourselves instead of softprops/action-gh-release.
       # That action uploads assets CONCURRENTLY with no throttle/retry knob, so
@@ -360,12 +744,24 @@ jobs:
       - name: Publish releases (paced, retry-aware)
         if: steps.collect.outputs.count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Not GITHUB_TOKEN. The default token's release-write depends on
+          # who triggered the run: a `schedule:` run executes as the repository's
+          # scheduling identity and could write releases, but a dispatched run
+          # executes as whoever dispatched it, and for an app/OAuth-backed
+          # identity the API answers "403 Resource not accessible by
+          # integration" even though the job declares `contents: write` and the
+          # run log confirms the token was granted it. Since the nightly is now
+          # dispatched by the release trigger rather than fired by cron, the
+          # default token is no longer sufficient here. An explicit credential
+          # also makes publishing independent of who or what starts the run,
+          # which is the property that was quietly missing before.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GH_REPO: ${{ github.repository }}
           BUILD_ID: ${{ needs.preflight.outputs.build_id }}
           HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
           SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
           BUILT_AT: ${{ needs.preflight.outputs.built_at }}
+          WEBUI_DIGEST: ${{ needs.preflight.outputs.webui_digest }}
         run: |
           set -euo pipefail
 
@@ -407,36 +803,210 @@ jobs:
             done
           }
 
+          # `webui=` is what the next preflight diffs against to notice a WebUI-only
+          # change; drop the line rather than record an empty value, so a failed
+          # lookup reads as "unknown" and builds instead of matching a future empty.
           NOTES=$(printf 'sha=%s\nshort=%s\nbuilt_at=%s\n' "$HEAD_SHA" "$SHORT_SHA" "$BUILT_AT")
+          if [ -n "$WEBUI_DIGEST" ]; then
+            NOTES=$(printf '%s\nwebui=%s\n' "$NOTES" "$WEBUI_DIGEST")
+          fi
 
-          # Full asset set (firmware images + sizes/kconfig sidecars) → dated.
-          mapfile -t DATED < <(find dist -maxdepth 1 -type f | sort)
-          # nightly/latest are firmware-delivery aliases for flashers, so ship
-          # only the firmware images there — re-uploading the small JSON sidecars
-          # to two more releases is pure rate-limit cost for no consumer.
+          # Releases carry firmware and nothing else. The size reports and
+          # kconfig graphs that used to ride along as ~300 small JSON sidecars
+          # per build reach openipc.org once, from the report job below, out of
+          # their own reports-* artifacts. That also takes most of the paced
+          # uploads -- and most of the rate-limit exposure -- off this job.
           mapfile -t IMAGES < <(find dist -maxdepth 1 -type f -name 'openipc*.tgz' | sort)
 
-          # --- dated: immutable per-build history ---
-          ensure_release "$BUILD_ID" --prerelease --title "$BUILD_ID"
-          upload_paced "$BUILD_ID" "${DATED[@]}"
-          # Completion marker, uploaded LAST: its presence is the single downstream
-          # signal that the dated release finished publishing. firmware-explorer's
-          # prebuild gates ingestion on it so a rate-limit-truncated release is
-          # never indexed as a complete build.
-          printf '{"build_id":"%s","expected_assets":%s,"head_sha":"%s","built_at":"%s"}\n' \
-            "$BUILD_ID" "${#DATED[@]}" "$HEAD_SHA" "$BUILT_AT" > dist/_manifest.json
-          gh_retry gh release upload "$BUILD_ID" dist/_manifest.json --clobber
+          # Nothing moves when there is no firmware to move it to. A dated
+          # release with nothing in it, or the two tags flashers pull from
+          # pointing at one, is worse than leaving everything on yesterday's.
+          if [ "${#IMAGES[@]}" -eq 0 ]; then
+            echo "::warning::no images in this build; no dated release, and nightly and latest stay where they are"
+          else
+            # --- dated: immutable per-build history ---
+            ensure_release "$BUILD_ID" --prerelease --title "$BUILD_ID"
+            upload_paced "$BUILD_ID" "${IMAGES[@]}"
 
-          # --- rolling nightly: move tag + body to this build, refresh images ---
-          ensure_release nightly
-          gh_retry gh release edit nightly --notes "$NOTES"
-          gh_retry gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/nightly" -f sha="$HEAD_SHA" -F force=true
-          upload_paced nightly "${IMAGES[@]}"
+            # --- rolling nightly: move tag + body to this build, refresh images ---
+            ensure_release nightly
+            gh_retry gh release edit nightly --notes "$NOTES"
+            gh_retry gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/nightly" -f sha="$HEAD_SHA" -F force=true
+            upload_paced nightly "${IMAGES[@]}"
 
-          # --- latest: legacy alias ---
-          ensure_release latest
-          gh_retry gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/latest" -f sha="$HEAD_SHA" -F force=true
-          upload_paced latest "${IMAGES[@]}"
+            # --- latest: legacy alias ---
+            ensure_release latest
+            gh_retry gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/latest" -f sha="$HEAD_SHA" -F force=true
+            upload_paced latest "${IMAGES[@]}"
+          fi
+
+  # openipc.org learns about the build here, once: which images were published
+  # and their digests, each board's size report and kconfig graph, and the SoC
+  # aliases. It never polls GitHub for any of it, and none of it is uploaded to
+  # a release for anyone to find. The contract, and who may push, is
+  # https://github.com/OpenIPC/website/blob/master/service/internal/builds/PUSH.md
+  #
+  # Authorization is this job's OIDC token (audience https://openipc.org),
+  # which openipc.org checks against the repository, this workflow and
+  # master. There is no secret to store or rotate.
+  #
+  # A job of its own, after publish, so that:
+  #   - openipc.org being down cannot cost a published nightly anything;
+  #   - the push can be re-run by itself once it is back, because the push is
+  #     idempotent by build id. It reads the release and the reports-*
+  #     artifacts, which are kept a week.
+  # Not in ci-gate's needs, for the same reason.
+  report:
+    name: Report build to openipc.org
+    needs: [preflight, publish]
+    if: >-
+      !cancelled() &&
+      github.event_name != 'pull_request' &&
+      needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    # id-token is what authorizes the push, so nothing but this repository's
+    # own scripts, at the built commit, runs here: the artifacts are read as
+    # data, never executed. actions: read is for counting the reports-*
+    # artifacts the matrix uploaded (the guard below).
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    timeout-minutes: 20
+    steps:
+      # First: checkout cleans the workspace, so anything downloaded before it
+      # would be deleted. The push script and the defconfigs, at the commit
+      # that was built -- the aliases come from the same tree as the images.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.head_sha }}
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/scripts/
+            br-ext-chip-*/configs/
+
+      # The reports only, outside the checkout. The images are described from
+      # the release itself below, so nothing here depends on the one-day fw-*
+      # artifacts, and a re-run works for as long as the reports are kept (a
+      # week).
+      - name: Download reports
+        id: reports
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: reports-*
+          path: ${{ runner.temp }}/reports
+          merge-multiple: true
+
+      # What was published, as GitHub has it: each image's size and the
+      # sha256 GitHub computed on upload. publish creates no dated release
+      # when there were no images, and then there is nothing to report.
+      #
+      # "No reports produced" and "reports lost" look the same to the push --
+      # platforms without detail -- and only the first is acceptable. So if the
+      # matrix uploaded any reports-* artifact, some report has to be here.
+      - name: Push the build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          REPORTS: ${{ runner.temp }}/reports
+          DOWNLOAD: ${{ steps.reports.outcome }}
+          BUILD_ID: ${{ needs.preflight.outputs.build_id }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          BUILT_AT: ${{ needs.preflight.outputs.built_at }}
+          WEBUI_DIGEST: ${{ needs.preflight.outputs.webui_digest }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$BUILD_ID" --json assets > release.json; then
+            echo "::notice::no release $BUILD_ID; nothing to report"
+            exit 0
+          fi
+          uploaded=$(gh api "repos/${GH_REPO}/actions/runs/${RUN_ID}/artifacts" --paginate \
+            --jq '.artifacts[] | select(.name | startswith("reports-")) | select(.expired | not) | .name' | wc -l)
+          # A missing directory is zero reports, not a failed step: find's
+          # non-zero exit would otherwise end it under pipefail.
+          found=0
+          if [ -d "$REPORTS" ]; then
+            found=$(find "$REPORTS" -maxdepth 1 -name '*.json' | wc -l)
+          fi
+          echo "reports-* artifacts uploaded: ${uploaded}; report files here: ${found}"
+          if [ "$uploaded" -gt 0 ] && { [ "$DOWNLOAD" != success ] || [ "$found" -eq 0 ]; }; then
+            echo "::error::the matrix uploaded ${uploaded} reports-* artifact(s) but none reached this job (download: ${DOWNLOAD}); refusing to push platforms without their reports"
+            exit 1
+          fi
+          python3 .github/scripts/push_build.py \
+            --source firmware \
+            --build-id "$BUILD_ID" \
+            --sha "$HEAD_SHA" \
+            --built-at "$BUILT_AT" \
+            --webui-digest "$WEBUI_DIGEST" \
+            --reports "$REPORTS" \
+            --release-json release.json \
+            --match '^openipc\..*\.tgz$' \
+            --aliases-root .
+
+  # "The nightly is red" does not say whether one board broke or ninety-four.
+  # On 2026-08-12 (run 31649720825) a majestic-webui fixup did a bare `rm` on
+  # two files upstream had deleted, and 94 of 99 boards failed in the same
+  # place -- which took opening 94 job logs to establish, because the run's
+  # entire output was the word "failure". #2271 asked whether one failing cell
+  # should still fail the run. It should (see ci-gate below); what was missing
+  # was being able to read the run at a glance, and that is this job.
+  #
+  # It also reports what the retry loop absorbs. A board that went green on its
+  # third attempt is invisible in a green run, and the same cause exhausting
+  # its budget is exactly what turns the nightly red -- that was 30% of runs
+  # before #2036.
+  #
+  # REPORTING ONLY. It must never fail the run: a bug here turning a good
+  # nightly red is precisely the mistake #2271 decided not to make. Hence the
+  # `||` below, and hence its deliberate absence from ci-gate's `needs`. What
+  # keeps it honest instead is `build-summary.py --self-test` in lint.yml,
+  # which is a merge gate -- a reworded annotation would otherwise reduce this
+  # to reporting nothing, and reporting nothing looks like a quiet night.
+  #
+  # Not gated on `publish`: this describes the matrix, and waiting for the
+  # release writer would only delay the answer by the length of ~390 paced
+  # uploads.
+  summary:
+    name: Build summary
+    # preflight for the build id in the title, buildroot for the matrix itself.
+    # `select` is not listed: buildroot already depends on it, so a selector
+    # failure skips the matrix and this job with it.
+    needs: [preflight, buildroot]
+    # Same guard as the jobs above. `always()` so it still reports when the
+    # matrix failed -- which is the case it exists for -- but not when there
+    # was nothing to build, where it would have nothing to say.
+    if: >-
+      always() && needs.buildroot.result != 'skipped' &&
+      (github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private))
+    runs-on: ubuntu-latest
+    # Declared rather than inherited, so the token stays narrow whatever the
+    # repo or org default becomes: the run's jobs and the scheduled runs behind
+    # the streaks (actions), the annotations those jobs emitted (checks), and
+    # the checkout (contents). It writes nothing anywhere.
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+    # Roughly 130 API requests and a couple of minutes at worst. The default is
+    # six hours, which is how a step that hangs rather than fails holds a
+    # runner and tells nobody.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Summarise the matrix
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/build-summary.py \
+            --run-id "${{ github.run_id }}" \
+            --event "${{ github.event_name }}" \
+            --build-id "${{ needs.preflight.outputs.build_id }}" \
+          || echo "::warning::build summary failed; the matrix result stands as reported"
 
   # Single umbrella status check that reflects the whole build matrix, so the
   # branch-protection required-checks list does not need one hardcoded
@@ -445,23 +1015,62 @@ jobs:
   # instead of the per-board contexts.
   ci-gate:
     name: CI Gate
-    needs: [preflight, buildroot, publish]
-    if: always()
+    needs: [select, preflight, buildroot, publish]
+    # always() so the gate still reports when a needed job fails -- but not on a
+    # run whose preflight the guard above deliberately skipped, where it would
+    # read preflight=skipped and turn a saved build into a red run. Upstream the
+    # added disjunct is true, so this reduces to always().
+    if: >-
+      always() && (github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private))
     runs-on: ubuntu-latest
     steps:
       - name: Require preflight + firmware matrix to succeed
         run: |
-          echo "preflight=${{ needs.preflight.result }} buildroot=${{ needs.buildroot.result }} publish=${{ needs.publish.result }}"
+          echo "select=${{ needs.select.result }} preflight=${{ needs.preflight.result }} buildroot=${{ needs.buildroot.result }} publish=${{ needs.publish.result }}"
+          if [ "${{ needs.select.result }}" != "success" ]; then
+            echo "::error::board selection did not succeed"; exit 1
+          fi
           if [ "${{ needs.preflight.result }}" != "success" ]; then
             echo "::error::preflight did not succeed"; exit 1
           fi
-          # On pull_request, preflight always sets should_build=true so the
-          # matrix runs; 'skipped' only happens on a scheduled no-op build.
-          case "${{ needs.buildroot.result }}" in
-            success|skipped) echo "firmware matrix OK (${{ needs.buildroot.result }})" ;;
-            *) echo "::error::firmware matrix result=${{ needs.buildroot.result }}"; exit 1 ;;
-          esac
-          # publish is skipped on PRs and on scheduled no-ops; only a real
+          # Check the matrix against what select and preflight actually asked
+          # for. Blanket-accepting 'skipped' here would mean a selector bug that
+          # narrowed a real change down to nothing reads as a green PR.
+          #
+          # ONE FAILING CELL OUT OF ~99 STILL FAILS THE RUN, and that is a
+          # decision rather than the default it started as -- #2271 asked, and
+          # this is the answer:
+          #
+          #   - The nightly's product is a COMPLETE set of images. A board that
+          #     failed leaves `nightly` and `latest` pointing at yesterday's
+          #     image for it, so whoever flashes that board silently gets stale
+          #     firmware. The run really did not deliver; green would be a lie.
+          #   - The transient classes are already absorbed upstream of here.
+          #     Anything that reaches this line survived seven attempts across
+          #     ~38 minutes of backoff (#2036), which is no longer a blip.
+          #   - This gate serves pull requests too. Relaxing the matrix rule to
+          #     quieten the nightly would relax branch protection with it.
+          #
+          # The real complaint behind #2271 -- that "red" does not say whether
+          # one board or ninety-four broke -- is answered by the Build summary
+          # job above, not by changing the colour here.
+          if [ "${{ needs.select.outputs.needs-build }}" = "true" ] && \
+             [ "${{ needs.preflight.outputs.should_build }}" = "true" ]; then
+            if [ "${{ needs.buildroot.result }}" != "success" ]; then
+              echo "::error::firmware matrix result=${{ needs.buildroot.result }} — see the Build summary job for the per-board breakdown"; exit 1
+            fi
+            echo "firmware matrix OK (success)"
+          else
+            # Nothing in the change reaches a build, the PR is still a draft, or
+            # the nightly found nothing new since the last one.
+            if [ "${{ needs.buildroot.result }}" != "skipped" ]; then
+              echo "::error::firmware matrix ran when it should not have (${{ needs.buildroot.result }})"; exit 1
+            fi
+            echo "firmware matrix OK (no boards to build)"
+          fi
+          # publish is skipped on PRs and on nightly no-ops; only a real
           # failure of the single release-writer should fail the gate.
           case "${{ needs.publish.result }}" in
             success|skipped) echo "publish OK (${{ needs.publish.result }})" ;;

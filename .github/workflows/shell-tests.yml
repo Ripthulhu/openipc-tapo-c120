@@ -3,21 +3,201 @@ on:
   pull_request:
     branches:
       - master
-  push:
-    branches:
-      - master
+  # Deliberately no push trigger. Every commit that reaches master was already
+  # parsed and tested by these same jobs on its pull request, so re-running them
+  # on the merge commit only re-proves what was just proven.
   workflow_dispatch:
 
 jobs:
+  # Same guard build.yml and gcc-compat.yml carry. These two jobs are cheap, but
+  # they are the last billed entry point a clone inherits: on a private mirror
+  # every master sync push and every internal PR runs them on that owner's bill.
+  # Upstream the first disjunct is true, so the condition is a tautology here.
   load-hisilicon-parsing:
     name: load_hisilicon os_mem_size derivation
+    if: >-
+      github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: bash .github/scripts/test_load_hisilicon.sh
 
+  sysupgrade-verify:
+    name: sysupgrade rootfs verification
+    if: >-
+      github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The parse-check that used to live here now runs for every shipped script
+      # in the job below, against the busybox ash the device actually uses. This
+      # step was `sh -n` then `dash -n`, which on ubuntu-latest is the same
+      # check twice (/bin/sh is dash) and neither is the target shell.
+      - run: bash .github/scripts/test_sysupgrade.sh
+
+      # The copy in git is not the copy that ships: the build strips whole-line
+      # comments out of it. Run the same suite against that form, so the thing
+      # cameras actually execute is the thing under test. Without this, the
+      # stripper could quietly change behaviour and every check above would
+      # still pass, having tested a file no device ever runs.
+      - name: Re-run against the stripped form that actually ships
+        run: |
+          awk -f general/scripts/strip-shell-comments.awk \
+            general/overlay/usr/sbin/sysupgrade > /tmp/sysupgrade.stripped
+          SRC=/tmp/sysupgrade.stripped bash .github/scripts/test_sysupgrade.sh
+
+  camera-mac:
+    name: the MAC the camera gives itself
+    if: >-
+      github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash .github/scripts/test_check_mac.sh
+
+      # Same reason as sysupgrade above: the copy in git is not the copy that
+      # ships. extutils is comment-stripped into the image, and check_mac runs
+      # at S30 on every boot of every camera, so the stripped form is the one
+      # that has to make the right decision.
+      - name: Re-run against the stripped form that actually ships
+        run: |
+          awk -f general/scripts/strip-shell-comments.awk \
+            general/overlay/usr/sbin/extutils > /tmp/extutils.stripped
+          SRC=/tmp/extutils.stripped bash .github/scripts/test_check_mac.sh
+
+  # Only sysupgrade was ever parse-checked; every other script in the image --
+  # the init scripts, /etc/profile, /init on initramfs boards, the vendor load_*
+  # scripts that insert the SoC drivers -- reached cameras without anything
+  # confirming it even parses. Nothing else covers them: the overlay and the
+  # package install steps copy these files in verbatim, so a green build says
+  # nothing about their syntax.
+  #
+  # Checked against busybox ash only, since that is what executes on the device.
+  # dash would be the wrong bar: the shipped busybox sets ASH_BASH_COMPAT, so
+  # `function name()` is valid in the field, and four scripts that run on real
+  # hardware fail under dash. See the header of test_shell_parse.sh.
+  #
+  # Deliberately syntax-only. A bashism audit (checkbashisms) over the same set
+  # is a much larger change -- `local` alone is used throughout -- and is worth
+  # doing separately rather than smuggling into a coverage PR.
+  excludes-report:
+    name: excludes lists report what they no longer prune
+    if: >-
+      github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rootfs_script.sh only reaches its excludes step during a board build,
+      # and a stale entry there is invisible by construction -- it removes
+      # nothing and says nothing. This drives the real script against a
+      # synthetic target instead, so the reporting is covered without paying
+      # for a build.
+      - run: bash .github/scripts/test_excludes_report.sh
+
+  ca-bundle-lite:
+    name: lite CA bundle keeps the roots it must
+    if: >-
+      github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A lite bundle that lost GitHub's or Let's Encrypt's root builds green
+      # and is found only when sysupgrade cannot fetch. This runs the real
+      # rootfs_script.sh cut against the committed bundle, so a Mozilla refresh
+      # or a keep-list edit is checked without a build (#2508).
+      - run: bash .github/scripts/test_ca_bundle_lite.sh
+
+  shipped-shell-parse:
+    name: shipped shell scripts parse
+    if: >-
+      github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install busybox
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq busybox-static
+      - name: Parse every shipped shell script
+        # STRICT=1 so a busybox that failed to install fails the job instead of
+        # skipping every check and still reporting green.
+        env:
+          STRICT: 1
+        run: bash .github/scripts/test_shell_parse.sh
+
+      # The build strips whole-line comments from all of the above before they
+      # are flashed. Parsing only the tree copy would leave that transform --
+      # which rewrites 128 files nobody reads again -- entirely unchecked.
+      - name: Parse them again as the stripper leaves them
+        env:
+          STRICT: 1
+        run: bash .github/scripts/test_strip_shell_comments.sh
+
+  # Advisory until now, like lint.yml's jobs, and #2351 showed what that is
+  # worth: it merged with a red lint check and broke master. These four are the
+  # only thing standing between a syntax error in a shipped script and a camera
+  # that runs it, so being able to merge past them is worse here than there.
+  #
+  # One umbrella context, matching build.yml's CI Gate and lint.yml's Lint Gate,
+  # so branch protection names a stable check and a fifth job added below is
+  # covered without a settings change.
+  shell-tests-gate:
+    name: Shell Tests Gate
+    needs:
+      - load-hisilicon-parsing
+      - sysupgrade-verify
+      - camera-mac
+      - excludes-report
+      - ca-bundle-lite
+      - shipped-shell-parse
+    # always() so the gate reports when a needed job fails, but not on a run
+    # whose jobs the guard above deliberately skipped. Upstream the added
+    # disjunct is true, so this reduces to always().
+    if: >-
+      always() && (github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every shell test to succeed
+        run: |
+          echo "load-hisilicon=${{ needs.load-hisilicon-parsing.result }} sysupgrade=${{ needs.sysupgrade-verify.result }} camera-mac=${{ needs.camera-mac.result }} excludes=${{ needs.excludes-report.result }} ca-bundle=${{ needs.ca-bundle-lite.result }} shell-parse=${{ needs.shipped-shell-parse.result }}"
+          # 'skipped' is not accepted, for the reason given in lint.yml: a
+          # skipped job would take this context green having checked nothing.
+          if [ "${{ needs.load-hisilicon-parsing.result }}" != "success" ]; then
+            echo "::error::load_hisilicon os_mem_size derivation did not succeed"; exit 1
+          fi
+          if [ "${{ needs.sysupgrade-verify.result }}" != "success" ]; then
+            echo "::error::sysupgrade rootfs verification did not succeed"; exit 1
+          fi
+          if [ "${{ needs.camera-mac.result }}" != "success" ]; then
+            echo "::error::the MAC the camera gives itself did not succeed"; exit 1
+          fi
+          if [ "${{ needs.excludes-report.result }}" != "success" ]; then
+            echo "::error::excludes lists report did not succeed"; exit 1
+          fi
+          if [ "${{ needs.ca-bundle-lite.result }}" != "success" ]; then
+            echo "::error::lite CA bundle check did not succeed"; exit 1
+          fi
+          if [ "${{ needs.shipped-shell-parse.result }}" != "success" ]; then
+            echo "::error::shipped shell scripts parse did not succeed"; exit 1
+          fi
+
   c120-runtime:
-    name: C120 native helper and AP recovery
+    name: C120 native helper, QHD and AP recovery
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,14 +1,242 @@
 #!/bin/sh
-CMD=$(echo "$0" | cut -d / -f 4)
+CMD=${0##*/}
 ARCH=$(uname -m)
 
 if echo "$ARCH" | grep -q mips; then
 	ARC="-mips32"
 fi
 
+MAJESTIC_CFG=/etc/majestic.yaml
+
+# The path of a -s/-d call on majestic's own config, or empty when this call is
+# neither. yaml-cli takes its flags in any order and lets the last mode win
+# (src/input_data.c parse_args), so that is mirrored here rather than assuming
+# the mode is $1. An explicit -i/-o means some other file -- sensor_cli and the
+# wfb applet both rely on that -- and reports nothing.
+majestic_write_path() {
+	wp= other=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			-s | --set)
+				[ $# -ge 3 ] || return
+				wp=$2
+				shift 3
+				;;
+			-d | --del)
+				[ $# -ge 2 ] || return
+				wp=$2
+				shift 2
+				;;
+			-g | --get)
+				[ $# -ge 2 ] || return
+				wp=
+				shift 2
+				;;
+			-i | --input | -o | --output)
+				[ $# -ge 2 ] || return
+				other=1
+				shift 2
+				;;
+			*)
+				shift
+				;;
+		esac
+	done
+	[ "$other" = 1 ] || echo "$wp"
+}
+
+# The majestic processes that can safely be told to reload.
+#
+# Process existence is not readiness. S95majestic starts it with
+# start-stop-daemon -b, which returns at the fork, so boot carries straight on
+# into the S98 scripts while majestic is still working its way down main()
+# towards the point where it installs a SIGHUP handler. Until it gets there the
+# default action for SIGHUP applies, and that is to terminate -- so a reload
+# asked for in that window does not reload the camera, it takes the streamer
+# away for the rest of the boot. Measured on a hi3516ev200: the process is
+# visible to pidof with SigCgt still 0000000000000000.
+#
+# /proc/<pid>/status answers the question exactly. SigCgt is the caught-signal
+# mask and SIGHUP is signal 1, so it is the lowest bit -- the mask ends in an
+# odd hex digit precisely when the handler is installed.
+majestic_reload_pids() {
+	for pid in $(pidof majestic 2>/dev/null); do
+		case "$(sed -n 's/^SigCgt:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null)" in
+			*[13579bdfBDF]) echo "$pid" ;;
+		esac
+	done
+}
+
+# A path yaml-cli will happily store and majestic will never read. The tree
+# ships one: t40_lite_movols-mo-805p's customizer.sh says
+# `cli -s .video0.bitrate: 4000`, and the trailing colon is why six of that
+# device's settings have never applied. Nothing reported it, because writing
+# the file cannot fail. Checking the shape is cheap, needs no network, and
+# catches the whole class.
+majestic_bad_path() {
+	case "$1" in
+		*[!A-Za-z0-9_.-]*) return 0 ;;
+		*..* | *. | .) return 0 ;;
+	esac
+	return 1
+}
+
+# The address a camera may keep as its own.
+#
+# Shape first: six hex pairs, and the second nibble of the first octet even --
+# that bit is the group bit, and a multicast address is not a legal source
+# address for a frame the camera sends.
+mac_is_valid() {
+	echo "$1" | grep -Eiq '^[0-9a-f][02468ace](:[0-9a-f]{2}){5}$' || return 1
+	[ "$1" != 00:00:00:00:00:00 ]
+}
+
+# 00:00:23:34:45:xx is nobody's address. HiSilicon u-boot bakes
+# 00:00:23:34:45:66 into its default env (CONFIG_ETHADDR, in the board
+# headers), a full image carries no environment at all so the value is
+# whatever u-boot compiled in, and this overlay used to fall back to the same
+# literal in two places -- so the fleet converges on it. The last octet tracks
+# the bootloader build rather than the camera: a lab hi3516ev300 was found on
+# :88, which is why the whole prefix is matched and not one value.
+#
+# 00:00:23 is a registered OUI that OpenIPC does not own, so no camera has a
+# legitimate claim to any of the 256.
+mac_is_placeholder() {
+	case "$1" in
+		00:00:23:34:45:*) return 0 ;;
+	esac
+	return 1
+}
+
+mac_is_own() { mac_is_valid "$1" && ! mac_is_placeholder "$1"; }
+
+# A locally administered unicast address: bit 1 of the first octet set, bit 0
+# clear. 02: is the lowest prefix that satisfies both, and holding it fixed
+# also makes a self-assigned address recognisable beside a real vendor OUI.
+#
+# The read is bounded because it runs at S30, ahead of everything after
+# S40network. A kernel with no entropy source yet blocks /dev/urandom until
+# its CRNG is ready: on a hi3516av100 _neo image under QEMU (no working arch
+# timer) that was 85 s, measured. -k for the reason udhcpc's ntpd call has
+# it: TERM alone bounds nothing against a process that does not act on it. A
+# camera whose store refuses the write mints again at every boot, so this is
+# paid every time, not once.
+#
+# The fallback is the address already on eth0, and only when it is locally
+# administered. Two things put one there. The kernel's own random pick, drawn
+# from its pool without waiting, is forced to the 02 prefix like a minted
+# address. An ethaddr= bootarg (openipc_ethaddr applies it to eth0; it is how
+# an NFS-root camera gets its address) is kept exactly: that is this camera's
+# address from its u-boot env, and rewriting it would persist a different one
+# for the next boot. A vendor OUI on eth0 is refused whichever way it came --
+# a u-boot default is shared fleet-wide, the placeholder being the known case,
+# and copying it is the duplicate-identity bug.
+mac_generate() {
+	# The group redirect, not one on timeout: when the limit fires it is ash
+	# that reports the kill ("Terminated"), to its own stderr, and that line
+	# would land in the boot log.
+	generated=$( { timeout -k 1 3 od -An -tx1 -N5 /dev/urandom | tr -d ' ' |
+		sed 's/^\(..\)\(..\)\(..\)\(..\)\(..\)$/02:\1:\2:\3:\4:\5/'; } 2>/dev/null)
+	if ! mac_is_own "$generated"; then
+		live=$(cat "/sys/class/net/eth0/address" 2>/dev/null)
+		bootarg=
+		for arg in $(cat /proc/cmdline 2>/dev/null); do
+			case "$arg" in ethaddr=*) bootarg=$(echo "${arg#ethaddr=}" | tr 'A-F' 'a-f') ;; esac
+		done
+		case "$live" in
+			[0-9a-f][26ae]:*)
+				if [ "$live" = "$bootarg" ]; then
+					generated=$live
+				else
+					generated=02:${live#??:}
+				fi
+				;;
+		esac
+	fi
+	# The pipeline reports sed's status, so a short read or a missing
+	# /dev/urandom comes back as success with nothing in it. That must not
+	# reach the store: `fw_setenv ethaddr ""` does not write an empty address,
+	# it DELETES the variable -- which is #2405 again, a fresh random MAC every
+	# boot, on a camera that had one a moment ago.
+	mac_is_own "$generated" || return 1
+	echo "$generated"
+}
+
+# The address the camera came with, where a stock firmware left one behind.
+# ipcinfo --xm-mac scans the flash for the Xiongmai magic and decodes the MAC
+# that follows it. It looks for a magic rather than trusting a partition
+# layout, so it is worth trying whatever the SoC vendor says -- xiongmai and
+# sigmastar cameras are built on the same stock images as the hisilicon ones
+# this was first written for (#1147) -- but only on NOR, which is the only
+# place that layout exists.
+mac_from_flash() {
+	command -v ipcinfo >/dev/null 2>&1 || return 1
+	[ "$(ipcinfo -F 2>/dev/null)" = nor ] || return 1
+	xmmac=$(ipcinfo --xm-mac 2>/dev/null) || return 1
+	mac_is_own "$xmmac" || return 1
+	echo "$xmmac"
+}
+
+# Where a MAC is kept. The u-boot environment first: sysupgrade never touches
+# that partition, so an address stored there survives firstboot, which is what
+# a DHCP reservation needs. /etc/ethaddr is for the boards that have no
+# fw_setenv at all -- BR2_PACKAGE_UBOOT_TOOLS is off on the two ambarella s2l
+# defconfigs -- and lives on the overlay, so firstboot wipes it and the camera
+# mints a fresh address next boot.
+ETHADDR_FILE=/etc/ethaddr
+
+mac_stored() {
+	stored=$(fw_printenv -n ethaddr 2>/dev/null)
+	if mac_is_own "$stored"; then echo "$stored"; return 0; fi
+	stored=$(cat "$ETHADDR_FILE" 2>/dev/null)
+	if mac_is_own "$stored"; then echo "$stored"; return 0; fi
+	return 1
+}
+
+mac_persist() {
+	# Guarded here as well as in every caller, because this is the last point
+	# before a bad value becomes permanent.
+	mac_is_own "$1" || return 1
+	if command -v fw_setenv >/dev/null 2>&1 && fw_setenv ethaddr "$1" 2>/dev/null; then
+		return 0
+	fi
+	# Braced so the redirection's own failure is suppressed too: `echo >f
+	# 2>/dev/null` sets up >f first, and a read-only /etc reports that to the
+	# stderr the next word is about to replace.
+	{ echo "$1" > "$ETHADDR_FILE"; } 2>/dev/null
+}
+
 case "$CMD" in
 	cli)
-		yaml-cli -i /etc/majestic.yaml "$@"
+		wpath=$(majestic_write_path "$@")
+		if [ -n "$wpath" ] && majestic_bad_path "$wpath"; then
+			echo "cli: '$wpath' is not a setting path, nothing written" >&2
+			exit 1
+		fi
+
+		yaml-cli -i "$MAJESTIC_CFG" "$@"
+		rc=$?
+
+		# Writing the file changes nothing that is already running, which is why
+		# `cli -s .video0.fps 20` used to report success and leave the camera
+		# streaming at the old rate until somebody worked out that a reload was
+		# needed. majestic re-reads the file on SIGHUP, diffs it against the tree
+		# in force and prices the difference on its own ladder -- a live key is
+		# pushed straight at the SDK, a service key restarts only that service,
+		# and only a pipeline key rebuilds -- so asking for it here costs the
+		# stream nothing for most settings. Repeated signals inside 3s collapse
+		# into one reload, so a burst of writes still reloads once.
+		#
+		# Deliberately conditional on majestic being up AND ready to be signalled:
+		# at S30, where customizer.sh seeds a device's config, it is not running at
+		# all, and provisioning must stay exactly as it was. This is the pattern
+		# wifibroadcast already applies by hand after its own writes.
+		if [ "$rc" = 0 ] && [ -n "$wpath" ]; then
+			for pid in $(majestic_reload_pids); do
+				kill -1 "$pid"
+			done
+		fi
+		exit "$rc"
 		;;
 
 	sensor_cli)
@@ -32,18 +260,91 @@ case "$CMD" in
 		;;
 
 	check_mac)
-		VENDOR=$(ipcinfo -v)
-		if [ "$VENDOR" = "hisilicon" ] || [ "$VENDOR" = "goke" ]; then
-			if [ "$(fw_printenv -n ethaddr)" = "00:00:23:34:45:66" ]; then
-				XMMAC=$(ipcinfo --xm-mac)
-				if [ -n "$XMMAC" ] && [ "$XMMAC" != "Nothing found." ]; then
-					fw_setenv ethaddr "$XMMAC"
-					reboot -f
-				else
-					echo "Warning. Wired network interface has default MAC address, please change it."
-				fi
+		# Runs from S30customizer, which is before S40network: S40network reads
+		# ethaddr at its own start and interfaces.d/eth0 expands get_mac at ifup
+		# time, so an address written here is picked up later in the same boot.
+		# That is why this no longer reboots -- #1147 did, and did not need to.
+		#
+		# A camera that already has an address of its own is left alone. The
+		# repair is for the two ways a camera ends up without one: no environment
+		# at all after a full-image flash (#2405, a fresh random MAC every boot),
+		# and the placeholder every bootloader of a family ships. Duplicates are
+		# not cosmetic -- S96onvifserver derives serial_num from the interface
+		# MAC, so two cameras sharing an address also claim one ONVIF identity.
+		mac_stored >/dev/null && exit 0
+
+		was=$(fw_printenv -n ethaddr 2>/dev/null)
+		mac=$(mac_from_flash) || mac=$(mac_generate)
+		if [ -z "$mac" ]; then
+			echo "check_mac: no MAC address could be produced, eth0 keeps the one the kernel picked" >&2
+			exit 1
+		fi
+		if ! mac_persist "$mac"; then
+			echo "check_mac: nowhere to store a MAC address, eth0 keeps the one the kernel picked" >&2
+			exit 1
+		fi
+
+		# Say what was replaced, not just what was chosen. Taking an address
+		# off a camera that had been answering on it is worth one line in the
+		# boot log, so whoever goes looking for the old one finds the reason.
+		if mac_is_placeholder "$was"; then
+			echo "check_mac: $was is the placeholder shipped fleet-wide, assigned $mac"
+		else
+			echo "check_mac: assigned $mac"
+		fi
+
+		# NFS root is the one boot where this cannot take effect now.
+		# S39netprofiles swaps interfaces.d/eth0 for a no-op, because the
+		# kernel already configured eth0 from the ethaddr= bootarg -- and that
+		# interface is carrying the root filesystem, so changing its MAC would
+		# pull the rootfs out from under the running system. The stored value
+		# reaches u-boot, which passes it as the bootarg, so the camera comes
+		# up on it next boot. Better than forcing a reboot over NFS.
+		if grep -q "root=/dev/nfs" /proc/cmdline 2>/dev/null; then
+			echo "check_mac: NFS root, so eth0 keeps $(cat "/sys/class/net/eth0/address" 2>/dev/null) until the next boot"
+		fi
+		;;
+
+	get_mac)
+		# Printed straight into `hwaddress ether` by interfaces.d/eth0 and by
+		# majestic-webui's setnetwork, so it has to print something busybox ifup
+		# will accept whatever else has gone wrong: an empty value makes ifup
+		# treat the command as failed and the camera never starts udhcpc.
+		#
+		# The last resort is therefore the address the interface already carries,
+		# which makes the assignment a no-op. A kernel-random MAC that changes
+		# each boot is bad; a literal shared with every other camera is worse.
+		mac_stored && exit 0
+		cat "/sys/class/net/${1:-eth0}/address" 2>/dev/null
+		;;
+
+	set_mac)
+		# The manual override. With an argument it stores that address; with none
+		# it mints a fresh one, which is how two cameras that collided are pulled
+		# apart. Unlike check_mac it replaces an address that is already good --
+		# being asked is the whole point.
+		mac=$1
+		if [ -n "$mac" ]; then
+			if ! mac_is_valid "$mac"; then
+				echo "set_mac: '$mac' is not a unicast MAC address" >&2
+				exit 1
+			fi
+			if mac_is_placeholder "$mac"; then
+				echo "set_mac: '$mac' is the placeholder the whole fleet shares" >&2
+				exit 1
+			fi
+		else
+			mac=$(mac_generate)
+			if [ -z "$mac" ]; then
+				echo "set_mac: could not generate a MAC address" >&2
+				exit 1
 			fi
 		fi
+		if ! mac_persist "$mac"; then
+			echo "set_mac: nowhere to store a MAC address" >&2
+			exit 1
+		fi
+		echo "ethaddr: $mac"
 		;;
 
         sysinfo)
