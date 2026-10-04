@@ -144,7 +144,7 @@ attempts() {
 }
 
 disk zzdisk0 131072
-expected="vfat exfat ext4 ext3 ext2 f2fs msdos ntfs iso9660 udf"
+expected="vfat exfat ext4 ext3 ext2 f2fs xfs msdos ntfs iso9660 udf"
 
 check "whole disk offers only removable-media types" "$(attempts zzdisk0)" "${expected}"
 
@@ -156,9 +156,8 @@ for banned in yaffs yaffs2 jffs2 ubifs squashfs auto; do
 		"$(attempts zzdisk0 | tr ' ' '\n' | grep -cx "${banned}")" "0"
 done
 
-# A partition is not a directory under /sys/block, so it keeps the auto it has
-# always had. This change opens a new path; it does not narrow the old one.
-check "partition keeps auto" "$(attempts zzdisk0p1)" "auto"
+# Partitions use the same safe list; auto can also select raw-flash drivers here.
+check "partition offers only removable-media types" "$(attempts zzdisk0p1)" "${expected}"
 
 # Every board config in the tree enables VFAT; it is tried first so the common
 # card costs one syscall rather than ten.

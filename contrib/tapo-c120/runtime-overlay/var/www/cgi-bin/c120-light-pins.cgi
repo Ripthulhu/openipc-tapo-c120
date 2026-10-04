@@ -148,7 +148,7 @@ HTML
 
 cat <<HTML
 </pre>
-<p><a href="/cgi-bin/preview.cgi">Back to preview</a></p>
+<p><a href="/cgi-bin/c120-lights.cgi">Back to camera lights</a></p>
 </body>
 </html>
 HTML

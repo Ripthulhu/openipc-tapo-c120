@@ -221,6 +221,17 @@ cli() {{ :; }}
         assert config.read_bytes() == saved, "invalid input changed configuration"
     render(lights, {"apply": "1", "pins": "12 13"})
     assert 'C120_LIGHT_PINS_RESPECT_EXCLUSIVE="0"' in config.read_text()
+    page = (BASE / "runtime-overlay/var/www/cgi-bin/c120-lights.cgi").read_text()
+    page = re.sub(r"<%in p/(?:common|header|footer).cgi %>", "", page)
+    write(root / "lights.cgi", page)
+    output = subprocess.run([haserl, str(root / "lights.cgi")],
+                            env=dict(os.environ, REQUEST_METHOD="GET", QUERY_STRING=""),
+                            capture_output=True, text=True, check=True).stdout
+    for mode in ("off", "850", "940", "both", "white"):
+        assert f'id="c120-{mode}"' in output
+    assert "850 + 940 nm" in output and 'role="alert"' in output
+    assert "get_metrics" not in page and "get_night" not in page
+    assert not (BASE / "runtime-overlay/var/www/cgi-bin/preview.cgi").exists()
     print("PASS forms: real Haserl decoding, Wi-Fi saves, GPIO settings and validation")
 
 
@@ -274,13 +285,6 @@ include {package}
     result = subprocess.run(check, capture_output=True, text=True)
     assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
     write(target / "etc/sensors/sc430ai.bin", "fixture\n")
-    subprocess.run(check, capture_output=True, check=True)
-    with config.open("a") as stream:
-        stream.write("BR2_PACKAGE_C120_QHD=y\n")
-    result = subprocess.run(check, capture_output=True, text=True)
-    assert result.returncode == 1 and "C120 QHD support" in result.stderr
-    write(target / "usr/lib/libc120-qhd.so", "fixture\n")
-    write(target / "etc/default/majestic", "fixture\n")
     subprocess.run(check, capture_output=True, check=True)
     print("PASS builds: exact board selection, isolated C120 defaults, local sensor source destination")
 

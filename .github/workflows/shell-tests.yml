@@ -162,6 +162,7 @@ jobs:
       - excludes-report
       - ca-bundle-lite
       - shipped-shell-parse
+      - c120-runtime
     # always() so the gate reports when a needed job fails, but not on a run
     # whose jobs the guard above deliberately skipped. Upstream the added
     # disjunct is true, so this reduces to always().
@@ -174,6 +175,9 @@ jobs:
     steps:
       - name: Require every shell test to succeed
         run: |
+          if [ "${{ needs.c120-runtime.result }}" != "success" ]; then
+            echo "::error::C120 runtime tests did not succeed"; exit 1
+          fi
           echo "load-hisilicon=${{ needs.load-hisilicon-parsing.result }} sysupgrade=${{ needs.sysupgrade-verify.result }} camera-mac=${{ needs.camera-mac.result }} excludes=${{ needs.excludes-report.result }} ca-bundle=${{ needs.ca-bundle-lite.result }} shell-parse=${{ needs.shipped-shell-parse.result }}"
           # 'skipped' is not accepted, for the reason given in lint.yml: a
           # skipped job would take this context green having checked nothing.

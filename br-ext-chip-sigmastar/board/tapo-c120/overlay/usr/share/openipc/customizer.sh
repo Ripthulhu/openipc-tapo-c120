@@ -27,7 +27,7 @@ cli -s .video0.size 2560x1440
 cli -s .video0.fps 20
 cli -s .video0.bitrate 10000
 cli -s .video0.rcMode cbr
-cli -s .video0.gopSize 40
+cli -s .video0.gopSize 2
 cli -s .video1.enabled false
 cli -s .jpeg.enabled false
 
