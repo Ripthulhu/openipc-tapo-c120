@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <math.h>
+#include <arpa/inet.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -11,6 +13,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -20,6 +23,9 @@
 #endif
 #define EVENT_CONF C120_ROOT "/etc/c120-eventd.conf"
 #define LIGHT_CONF C120_ROOT "/etc/c120-light-pins.conf"
+#define MOTION_CONF C120_ROOT "/etc/c120-motion-light.conf"
+#define MOTION_STATE C120_ROOT "/run/c120-motion-light.active"
+#define LAMP_LOCK C120_ROOT "/run/c120-lamps.lock"
 #define EVENT_PID C120_ROOT "/run/c120-eventd.pid"
 #define BUTTON_PID C120_ROOT "/run/c120-button-apd.pid"
 #define EVENT_LOCK C120_ROOT "/run/c120-eventd.lock"
@@ -29,6 +35,16 @@
 #define GPIO_ROOT C120_ROOT "/sys/class/gpio"
 
 #define MAX_PINS 16
+#define WHITE_GPIO 14
+#ifndef C120_HTTP_PORT
+#define C120_HTTP_PORT 80
+#endif
+#ifndef C120_MOTION_POLL_MS
+#define C120_MOTION_POLL_MS 1000
+#endif
+#ifndef C120_LIGHT_SETTLE_MS
+#define C120_LIGHT_SETTLE_MS 3000
+#endif
 
 struct config {
 	int reset_gpio;
@@ -38,14 +54,28 @@ struct config {
 	int light_poll_ms;
 	int respect_exclusive;
 	int log_enabled;
+	int motion_light_enabled;
+	int motion_light_seconds;
+	int motion_light_trigger_seconds;
 	int pins[MAX_PINS];
 	int pin_count;
+};
+
+struct motion_light {
+	unsigned long long count;
+	long long deadline;
+	long long ignore_until;
+	long long motion_since;
+	int have_count;
+	int owned;
+	int was_night;
 };
 
 static volatile sig_atomic_t keep_running = 1;
 static volatile sig_atomic_t reload_requested = 0;
 static int read_first_line(const char *path, char *buf, size_t len);
 static int read_pid(const char *path);
+static int daemon_pid(void);
 
 static void on_signal(int sig)
 {
@@ -196,6 +226,8 @@ static void defaults(struct config *cfg)
 	cfg->light_poll_ms = 500;
 	cfg->respect_exclusive = 1;
 	cfg->log_enabled = 0;
+	cfg->motion_light_seconds = 30;
+	cfg->motion_light_trigger_seconds = 3;
 	cfg->pins[0] = 12;
 	cfg->pins[1] = 13;
 	cfg->pin_count = 2;
@@ -246,6 +278,12 @@ static void parse_config_file(struct config *cfg, const char *path)
 			cfg->reset_hold_ticks = parse_int(value, 1, 999, cfg->reset_hold_ticks);
 		} else if (!strcmp(key, "C120_RESET_POLL_DELAY")) {
 			cfg->reset_poll_ms = parse_ms(value, cfg->reset_poll_ms);
+		} else if (!strcmp(key, "C120_MOTION_LIGHT_ENABLED")) {
+			cfg->motion_light_enabled = parse_bool_int(value, 0);
+		} else if (!strcmp(key, "C120_MOTION_LIGHT_SECONDS")) {
+			cfg->motion_light_seconds = parse_int(value, 1, 600, 30);
+		} else if (!strcmp(key, "C120_MOTION_LIGHT_TRIGGER_SECONDS")) {
+			cfg->motion_light_trigger_seconds = parse_int(value, 0, 600, 3);
 		}
 	}
 
@@ -257,6 +295,7 @@ static void load_config(struct config *cfg)
 	defaults(cfg);
 	parse_config_file(cfg, EVENT_CONF);
 	parse_config_file(cfg, LIGHT_CONF);
+	parse_config_file(cfg, MOTION_CONF);
 
 	if (cfg->reset_poll_ms < 50)
 		cfg->reset_poll_ms = 50;
@@ -407,6 +446,208 @@ static int sync_light(const struct config *cfg)
 	return 0;
 }
 
+static long long monotonic_ms(void)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* Read one native Prometheus metric without spawning a shell or adding a library.
+ * The entire loopback request is bounded, including stalled/partial responses. */
+static int http_metric(const char *path, const char *key, unsigned long long *value)
+{
+	struct sockaddr_in addr = { .sin_family = AF_INET,
+	    .sin_port = htons(C120_HTTP_PORT), .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+	struct pollfd pfd;
+	char request[192], response[8192];
+	size_t used = 0;
+	long long deadline = monotonic_ms() + 200;
+	int fd, length, result = -1;
+
+	fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (fd < 0)
+		return -1;
+	pfd = (struct pollfd){ .fd = fd, .events = POLLOUT };
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 && errno != EINPROGRESS)
+		goto done;
+	if (poll(&pfd, 1, 200) <= 0)
+		goto done;
+	length = snprintf(request, sizeof(request),
+	    "GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", path);
+	if (send(fd, request, (size_t)length, MSG_NOSIGNAL) != length)
+		goto done;
+	pfd.events = POLLIN;
+	while (used < sizeof(response) - 1) {
+		long long remaining = deadline - monotonic_ms();
+		ssize_t got;
+		char *body, *line, *end;
+		if (remaining <= 0 || poll(&pfd, 1, (int)remaining) <= 0)
+			break;
+		got = recv(fd, response + used, sizeof(response) - used - 1, 0);
+		if (got <= 0)
+			break;
+		used += (size_t)got;
+		response[used] = '\0';
+		body = strstr(response, "\r\n\r\n");
+		if (!body)
+			continue;
+		if (strncmp(response, "HTTP/1.0 200 ", 13) && strncmp(response, "HTTP/1.1 200 ", 13))
+			break;
+		for (line = body + 4; (end = strchr(line, '\n')); line = end + 1) {
+			char *tail;
+			unsigned long long metric;
+			size_t len = strlen(key);
+			if (strncmp(line, key, len) || line[len] != ' ' ||
+			    line[len + 1] < '0' || line[len + 1] > '9')
+				continue;
+			errno = 0;
+			metric = strtoull(line + len + 1, &tail, 10);
+			if (errno || (tail != end && !(tail + 1 == end && *tail == '\r')))
+				goto done;
+			*value = metric;
+			result = 0;
+			goto done;
+		}
+	}
+done:
+	close(fd);
+	return result;
+}
+
+static int motion_pin_available(const struct config *cfg)
+{
+	if (cfg->reset_gpio == WHITE_GPIO)
+		return 0;
+	for (int i = 0; i < cfg->pin_count; i++)
+		if (cfg->pins[i] == WHITE_GPIO)
+			return 0;
+	return 1;
+}
+
+static int lamp_lock(void)
+{
+	int fd = open(LAMP_LOCK, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+	if (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+static void motion_release(struct motion_light *state)
+{
+	/* Manual lamp commands remove the ownership marker while holding this lock. */
+	if (state->owned && file_exists(MOTION_STATE)) {
+		if (gpio_write_value(WHITE_GPIO, 0) < 0)
+			return;
+		unlink(MOTION_STATE);
+	}
+	if (state->owned)
+		state->ignore_until = monotonic_ms() + C120_LIGHT_SETTLE_MS;
+	state->owned = 0;
+	state->deadline = 0;
+	state->motion_since = 0;
+}
+
+static void motion_cancel(struct motion_light *state)
+{
+	int fd = lamp_lock();
+	if (fd >= 0) {
+		motion_release(state);
+		close(fd);
+	}
+	state->have_count = 0;
+	state->motion_since = 0;
+}
+
+static void motion_poll(const struct config *cfg, struct motion_light *state)
+{
+	unsigned long long night = 0, count = 0;
+	int valid = 0, moved, fd;
+	char mode[32] = "";
+	long long now;
+
+	if (cfg->motion_light_enabled && motion_pin_available(cfg) && !file_exists(AP_STATE))
+		valid = http_metric("/metrics/night", "night_enabled", &night) == 0 && night <= 1 &&
+		    http_metric("/metrics/motion", "md_rects_acc_total", &count) == 0;
+	now = monotonic_ms();
+	fd = lamp_lock();
+	if (fd < 0) {
+		state->motion_since = 0;
+		return;
+	}
+	if (state->owned && !file_exists(MOTION_STATE)) {
+		state->owned = 0;
+		state->deadline = 0;
+		state->have_count = 0;
+		state->ignore_until = now + C120_LIGHT_SETTLE_MS;
+	}
+	read_first_line(LAMP_STATE, mode, sizeof(mode));
+	moved = valid && state->have_count && count > state->count;
+	state->count = count;
+	state->have_count = valid;
+	if (valid && (int)night != state->was_night)
+		state->ignore_until = now + C120_LIGHT_SETTLE_MS;
+	state->was_night = valid && night;
+	/* Qualification needs detections in consecutive polls, not a delayed single event. */
+	if (!moved || now < state->ignore_until)
+		state->motion_since = 0;
+	else if (!state->motion_since)
+		state->motion_since = now;
+	if (!valid || !night || file_exists(AP_STATE) || !strcmp(mode, "white")) {
+		motion_release(state);
+	} else if (moved && now >= state->ignore_until && (state->owned ||
+	    now - state->motion_since >= (long long)cfg->motion_light_trigger_seconds * 1000)) {
+		FILE *fp = fopen(MOTION_STATE, "w");
+		long long deadline = now + (long long)cfg->motion_light_seconds * 1000;
+		if (fp) {
+			int ok = fprintf(fp, "%lld\n", deadline) > 0;
+			if (fclose(fp) != 0)
+				ok = 0;
+			if (ok && gpio_write_value(WHITE_GPIO, 1) == 0) {
+				if (!state->owned) {
+					log_msg(cfg, "motion floodlight on");
+					/* Exposure changes from our own lamp are not new motion. */
+					state->ignore_until = now + C120_LIGHT_SETTLE_MS;
+				}
+				state->owned = 1;
+				state->deadline = deadline;
+			} else {
+				/* Retain ownership of an already-on lamp so expiry can still clear it. */
+				if (!state->owned)
+					unlink(MOTION_STATE);
+			}
+		}
+	} else if (state->owned && now >= state->deadline) {
+		motion_release(state);
+		log_msg(cfg, "motion floodlight expired");
+	}
+	close(fd);
+}
+
+static int motion_status_cmd(void)
+{
+	struct config cfg;
+	char buf[64];
+	long long deadline = 0, remaining = 0;
+	int active;
+
+	load_config(&cfg);
+	if (read_first_line(MOTION_STATE, buf, sizeof(buf)) == 0)
+		sscanf(buf, "%lld", &deadline);
+	active = file_exists(MOTION_STATE) && gpio_read_value(WHITE_GPIO, 0) == 1;
+	if (active && deadline > monotonic_ms())
+		remaining = (deadline - monotonic_ms() + 999) / 1000;
+	printf("{\"enabled\":%s,\"seconds\":%d,\"triggerSeconds\":%d,\"active\":%s,\"remaining\":%lld,"
+	    "\"running\":%s,\"available\":%s}\n",
+	    cfg.motion_light_enabled ? "true" : "false", cfg.motion_light_seconds,
+	    cfg.motion_light_trigger_seconds,
+	    active ? "true" : "false", remaining,
+	    daemon_pid() > 0 ? "true" : "false", motion_pin_available(&cfg) ? "true" : "false");
+	return 0;
+}
+
 static void write_pid_file(const char *path)
 {
 	FILE *fp = fopen(path, "w");
@@ -481,10 +722,12 @@ static void sleep_ms(int ms)
 static int daemon_loop(void)
 {
 	struct config cfg;
+	struct motion_light motion = {0};
 	int pressed = 0;
 	int held = 0;
 	int light_elapsed = 0;
 	int lock_fd;
+	long long motion_due = 0;
 	struct sigaction action = {0};
 
 	load_config(&cfg);
@@ -504,6 +747,8 @@ static int daemon_loop(void)
 	write_pid_file(EVENT_PID);
 	write_pid_file(BUTTON_PID);
 	atexit(remove_pid_files);
+	motion.owned = file_exists(MOTION_STATE);
+	motion_cancel(&motion);
 
 	gpio_direction(cfg.reset_gpio, "in");
 	sync_light(&cfg);
@@ -516,7 +761,9 @@ static int daemon_loop(void)
 
 		if (reload_requested) {
 			reload_requested = 0;
+			motion_cancel(&motion);
 			load_config(&cfg);
+			motion_due = 0;
 			gpio_direction(cfg.reset_gpio, "in");
 			pressed = held = light_elapsed = 0;
 			log_msg(&cfg, "reloaded config");
@@ -531,6 +778,7 @@ static int daemon_loop(void)
 			}
 			held++;
 			if (held >= cfg.reset_hold_ticks) {
+				motion_cancel(&motion);
 				control_ap(&cfg);
 				while (keep_running &&
 				    gpio_read_value(cfg.reset_gpio, cfg.reset_active_value ? 0 : 1) ==
@@ -552,9 +800,14 @@ static int daemon_loop(void)
 			sync_light(&cfg);
 			light_elapsed = 0;
 		}
+		if (monotonic_ms() >= motion_due) {
+			motion_poll(&cfg, &motion);
+			motion_due = monotonic_ms() + C120_MOTION_POLL_MS;
+		}
 
 		sleep_ms(cfg.reset_poll_ms);
 	}
+	motion_cancel(&motion);
 	remove_pid_files();
 	close(lock_fd);
 	return 0;
@@ -600,7 +853,7 @@ static int status_cmd(void)
 
 static void usage(const char *argv0)
 {
-	fprintf(stderr, "usage: %s [daemon|status|sync|reload|stop]\n", argv0);
+	fprintf(stderr, "usage: %s [daemon|status|motion-status|sync|reload|stop]\n", argv0);
 }
 
 int main(int argc, char **argv)
@@ -612,6 +865,8 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(cmd, "status"))
 		return status_cmd();
+	if (!strcmp(cmd, "motion-status"))
+		return motion_status_cmd();
 	if (!strcmp(cmd, "sync")) {
 		struct config cfg;
 		load_config(&cfg);

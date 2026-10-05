@@ -21,6 +21,28 @@
 </fieldset>
 <p id="c120-light-status" class="text-body-secondary" role="status">Reading light state...</p>
 <p id="c120-light-error" class="text-danger" role="alert" hidden></p>
+<form id="c120-motion-form" class="mt-4 mb-4">
+	<fieldset id="c120-motion-fields" class="border-0 p-0" disabled>
+		<legend class="h5">Motion floodlight</legend>
+		<div class="form-check form-switch mb-3">
+			<input id="c120-motion-enabled" class="form-check-input" type="checkbox">
+			<label class="form-check-label" for="c120-motion-enabled">Night-only motion trigger</label>
+		</div>
+		<label class="form-label" for="c120-motion-trigger-seconds">Motion delay</label>
+		<div class="input-group mb-3" style="max-width:16rem">
+			<input id="c120-motion-trigger-seconds" class="form-control" type="number" min="0" max="600" step="1" value="3" required>
+			<span class="input-group-text">seconds</span>
+		</div>
+		<label class="form-label" for="c120-motion-seconds">Duration after motion</label>
+		<div class="input-group mb-3" style="max-width:16rem">
+			<input id="c120-motion-seconds" class="form-control" type="number" min="1" max="600" step="1" value="30" required>
+			<span class="input-group-text">seconds</span>
+		</div>
+		<button class="btn btn-primary" type="submit">Save Changes</button>
+	</fieldset>
+	<p id="c120-motion-status" class="text-body-secondary mt-3 mb-0" role="status">Reading timer state...</p>
+	<p id="c120-motion-error" class="text-danger mt-2 mb-0" role="alert" hidden></p>
+</form>
 <p><a href="c120-light-pins.cgi">Camera light GPIO pins</a></p>
 <p><a href="camera.cgi?tab=nightMode">Day / Night settings</a></p>
 
@@ -52,6 +74,55 @@
 	}
 	group.addEventListener('change', event => update(event.target.value));
 	update('status');
+
+	const form = document.getElementById('c120-motion-form');
+	const fields = document.getElementById('c120-motion-fields');
+	const enabled = document.getElementById('c120-motion-enabled');
+	const seconds = document.getElementById('c120-motion-seconds');
+	const triggerSeconds = document.getElementById('c120-motion-trigger-seconds');
+	const timerStatus = document.getElementById('c120-motion-status');
+	const timerError = document.getElementById('c120-motion-error');
+	let busy = false;
+	let loaded = false;
+	async function timerRequest(save = false) {
+		if (busy) return;
+		busy = true;
+		if (save) fields.disabled = true;
+		try {
+			const options = {cache: 'no-store'};
+			if (save) Object.assign(options, {
+				method: 'POST',
+				body: new URLSearchParams({enabled: enabled.checked ? '1' : '0', seconds: seconds.value,
+					triggerSeconds: triggerSeconds.value})
+			});
+			const response = await fetch('c120-motion-light.cgi', options);
+			const data = await response.json();
+			if (!response.ok) throw new Error(data.error || 'Could not read timer settings');
+			if (!loaded || save) {
+				enabled.checked = data.enabled;
+				seconds.value = data.seconds;
+				triggerSeconds.value = data.triggerSeconds;
+				loaded = true;
+			}
+			timerStatus.textContent = !data.running ? 'Camera helper stopped' : !data.available ?
+				'Floodlight GPIO is assigned to another control' : data.active ?
+				'Floodlight on: ' + data.remaining + ' s remaining' : data.enabled ? 'Armed' : 'Disabled';
+			timerError.hidden = true;
+		} catch (failure) {
+			timerError.textContent = failure.message + ' Try again.';
+			timerError.hidden = false;
+		} finally {
+			fields.disabled = !loaded;
+			busy = false;
+		}
+	}
+	form.addEventListener('submit', event => {
+		event.preventDefault();
+		if (form.reportValidity()) timerRequest(true);
+	});
+	timerRequest();
+	const timerPoll = setInterval(() => { if (!document.hidden) timerRequest(); }, 3000);
+	window.addEventListener('pagehide', () => clearInterval(timerPoll), {once: true});
 })();
 </script>
 <%in p/footer.cgi %>

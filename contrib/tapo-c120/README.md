@@ -19,16 +19,17 @@ The board profile sets:
 - IR-cut GPIO81 with inverted single-coil polarity
 - camera light leader GPIO12
 - native automatic day/night: 16x gain for night, 2x for day, 15/60-second delays
-- 2560x1440 H.264 at 20 fps, 10000 kbps CBR, GOP 2 seconds (40 frames)
+- 2560x1440 H.264 at 30 fps, 10000 kbps CBR, GOP 2 seconds (60 frames)
 - maximum exposure 33 ms for stable frame delivery
 - JPEG, video1, motion detect, records, and crond disabled by default
 
 These are first-boot defaults, scoped to the C120 board overlay. Installing or
 updating the recovery plugin does not alter video settings. Existing cameras
 retain their settings on upgrade, so also set the resolution/rate explicitly
-when migrating them to QHD. The sensor mode advertises 30 fps, but the verified
-QHD output target is 20 fps. The exposure cap can reduce low-light brightness;
-raising it may reduce the actual frame rate.
+when migrating them to QHD. The sensor mode advertises 30 fps; the first-boot
+QHD target is now 30 fps following the native trial below. The exposure
+cap can reduce low-light brightness; raising it may reduce the actual frame
+rate.
 
 The current upstream Majestic handles QHD natively through its Ring SCL-to-VENC
 binding. The old `c120-qhd` package and preload hook have been removed. On an
@@ -62,7 +63,7 @@ present. Other Infinity6C sensor profiles retain their existing behavior.
 
 - `c120-lamps` for off, white, 850 nm, 940 nm, and both-IR modes
 - `c120-light-pins.cgi` for configuring multiple camera-light GPIO pins
-- `c120-eventd` merged reset-button and light-pin mirror daemon
+- `c120-eventd` merged reset-button, light-pin mirror, and motion floodlight daemon
 - `c120-lights.cgi`, using the current Web UI's controls and navigation
 
 Install the AP recovery plugin with its own `install.sh` first. Then install the
@@ -77,6 +78,59 @@ AP. It preserves the light-pin configuration and backs up the navigation file.
 Open **Camera > C120 Lights** for the five lamp modes and multi-pin settings.
 Re-run this installer after a standalone upstream Web UI update to restore the
 menu entry. It does not replace upstream's live/preview page.
+
+The runtime installer also applies `dashboard-luminance.sed` to the dashboard:
+`isp_avelum` stays in raw SDK units, the scene-luminance graph auto-scales, and
+the incorrect universal `/ 255` label and 8-bit low-luminance band are removed.
+This is a display-only fix; camera exposure and day/night settings do not change.
+Re-running the installer is idempotent and backs up the old dashboard script.
+
+### Night Motion Floodlight
+
+**Camera > C120 Lights > Motion floodlight** provides a night-only enable switch
+and a duration of 1-600 seconds. Motion delay is adjustable from 0-600 seconds,
+defaulting to 3: the ROI-filtered counter must grow in consecutive one-second
+polls for that long before the light turns on. A quiet poll resets the wait;
+zero enables immediate triggering. Once lit, any further detection extends the
+off deadline without another qualification delay. The initial duration is 30 seconds; the feature
+is disabled on a new plugin install until enabled explicitly. Native Majestic
+motion detection must already be enabled and working; it is not enabled or
+retuned by this plugin. It uses the existing motion regions: detections rejected
+by Majestic's ROI filter do not start or extend the floodlight timer. With no
+regions configured, the native detector watches the whole image. Camera quality
+settings are never changed.
+
+The existing native helper reads `night_enabled` and the ROI-filtered native
+motion counter once per second. A new detection while night mode is active
+switches only white GPIO14 on; further motion extends the deadline. Expiry,
+day mode, detector/API failure, AP startup, disable/reload, and normal shutdown
+turn off a lamp owned by this timer. A three-second settling period after lamp
+or night transitions ignores exposure changes caused by the light itself.
+
+Manual lamp commands take ownership and cancel the current automatic timer.
+Manual white remains on until changed manually; the timer does not shut it off.
+Other manual modes can be followed by a fresh automatic trigger. GPIO12/13 and
+the IR-cut policy are not changed by the motion timer. Do not add GPIO14 to the
+IR mirror list: the motion feature refuses that conflicting assignment.
+
+Settings are stored separately in `/etc/c120-motion-light.conf` and survive
+reboots and plugin updates. The UI uses validated, same-origin POST requests.
+The small HTTP reader is bounded to 200 ms per loopback request; no shell polling
+process, extra resident daemon, dynamic library, or firmware reflash is needed.
+Status is available from `c120-eventd motion-status` as JSON.
+
+On 2026-10-05 this plugin was installed on both live cameras, with the feature
+disabled on `.126` and enabled on `.196`. Both retain a three-second motion
+delay and 30-second duration. Before adding the qualification delay, the owner
+confirmed physical motion/light-on/timed-off tests on both; recorded GPIO12/13
+stayed high throughout, while only GPIO14 switched. The added delay and
+out-of-region rejection passed simulated native-metric/GPIO tests; these are
+not a second physical movement test. Both current region lists are empty and
+were preserved. Final UI checks showed the saved off/on preferences and 3/30
+values at desktop and 390-pixel mobile width without form overflow or console
+errors. Complete native settings, Majestic PIDs, and boot IDs remained unchanged.
+Both sensors reported 30 fps at their saved 2560x1440/6000 kbps settings.
+The existing single-thread helper used 80/88 KiB RSS in the final sample.
 
 `c120-eventd.c` builds the native helper shipped in both payloads. It replaces
 the shell polling loop, enforces a single running instance, validates settings,
@@ -98,7 +152,12 @@ The helper is statically linked so both existing C120 firmware versions can run
 the same binary. The build updates both payload copies and `eventd.sha256`.
 Tests use simulated GPIOs and services; they never touch a camera. They cover
 button toggling, exclusive IR modes, reload/stop, duplicate processes, AP
-rollback, board selection, and sensor-source placement.
+rollback, board selection, and sensor-source placement. Motion tests cover
+ROI-filtered versus unfiltered events, continuous-motion qualification and quiet-gap reset, night gating,
+expiry/retrigger, scene-change settling, manual ownership,
+unavailable/invalid/stalled native metrics, counter resets, stale-marker cleanup,
+and POST validation. Real GPIO, native motion events, and the Web UI still need
+on-camera checks after deployment; simulated tests are not hardware evidence.
 
 On the two cameras checked on 2026-10-04, helper RSS fell from 928/964 KiB to
 60-64 KiB, and proportional memory from 198/229 KiB to 56-60 KiB. Shared BusyBox pages
@@ -267,3 +326,57 @@ persistently. An additional flash was not needed for this configuration change.
 
 The full ARM build, native helper/form tests, QHD defaults/startup/pruning tests,
 CI selector self-test, workflow syntax checks, and upstream shell tests passed.
+
+## QHD 30 FPS Trial, 2026-10-04
+
+Both cameras now retain an FPS-only change to 30 at 2560x1440 on the tested
+October Majestic. Their existing 10000/6000 kbps bitrates, 33 ms exposure cap,
+two-second GOP, audio, orientation, JPEG/motion settings and automatic day/night
+policy were preserved by complete effective-configuration comparisons. The
+separately installed AP/light helper remains running; both IR lamp pins still
+follow the automatic night state. No firmware flash, preload, sensor override,
+media-heap change or feature removal was needed.
+
+Changing `video0.fps` through the live API alone accepted 30 but still encoded
+about 20 fps on the first camera. A normal Majestic restart recreated the
+native Ring SCL-to-VENC binding at 30/1 -> 30/1 instead of 30/1 -> 20/1. For
+this tested build, restart after changing the saved frame rate:
+
+```sh
+cli -s .video0.fps 30
+/etc/init.d/S95majestic restart
+```
+
+Each camera passed a 15-second RTSP check followed by three 60-second checks,
+with working Opus audio, stable streamer PID and unchanged boot ID:
+
+| Camera suffix | Decoded frames per 60 s probe | Native encoded fps | Available RAM at end |
+| --- | --- | --- | --- |
+| .126 | 1771 / 1799 / 1786 | 29.960 / 29.981 / 29.967 | 10000 KiB |
+| .196 | 1799 / 1799 / 1799 | 29.992 / 29.993 / 29.994 | 9300 KiB |
+
+Native counter deltas are measured independently of the nominal H.264 header,
+which already advertised 30 even at the previous 20 fps setting. CPU usage
+during the longer probes was approximately 30-33% / 26-32%, and temperatures
+were 70/72 C. These are short night-mode trials, not an overnight stability or
+latency soak. Following the owner's approval, source first-boot defaults now
+use 30 fps and both cameras retain it persistently. The owner power-cycled both
+after the trial; these were intentional, not observed crashes. Subsequent
+15-second checks counted 449 QHD frames on each, with working audio and saved
+30 fps. To fall back to 20 fps, change `video0.fps` and perform the same normal streamer
+restart. Previously packed images retain their historical defaults; rebuild
+the C120 profile to include this source change. Existing camera overlays keep
+their saved video settings on upgrade.
+
+A separate package was rebuilt from `251e59a5` plus the FPS-default change.
+Kernel/rootfs sizes are 2039300/5140480 bytes, within the existing partitions.
+Packed-image inspection confirmed the 30 fps customizer, and the QHD defaults,
+pruning and streamer lifecycle tests passed. This new package has not been
+flashed or boot-tested; live cameras keep their verified base image and saved
+30 fps configuration.
+
+```text
+0719396c7af5386037d2551825de21f942cfc3980888b8c7c7fd57cf38be1648  uImage.ssc377
+9663b8f81db8b5086afc603d8a8bef9a281a8d55c18b4cd0175c61dd0f0b0fcb  rootfs.squashfs.ssc377
+740ca10fb746bfe83d034831e239fbdbc2a8e96f9fd849d9d74008b6e184a8a1  openipc.ssc377-nor-lite.tgz
+```

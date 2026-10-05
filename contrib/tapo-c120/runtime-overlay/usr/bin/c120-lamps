@@ -44,6 +44,10 @@ white_on() {
 }
 
 set_mode() {
+	# Coordinate manual control with the motion timer; manual commands take ownership.
+	exec 9>/run/c120-lamps.lock
+	flock -x 9 || return 1
+	rm -f /run/c120-motion-light.active
 	case "$1" in
 		off)
 			ir_off
@@ -81,6 +85,7 @@ set_mode() {
 			return 1
 			;;
 	esac
+	flock -u 9
 }
 
 read_file() {

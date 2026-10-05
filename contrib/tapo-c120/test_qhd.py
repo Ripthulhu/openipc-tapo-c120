@@ -18,7 +18,7 @@ def test_defaults(root):
     result = subprocess.run(["sh", "-c", 'cli() { echo "$*"; }; fw_setenv() { :; };\n' +
                              customizer.read_text().split("# The stock crontab")[0]],
                             check=True, capture_output=True, text=True)
-    for setting in (".video0.size 2560x1440", ".video0.fps 20", ".video0.bitrate 10000",
+    for setting in (".video0.size 2560x1440", ".video0.fps 30", ".video0.bitrate 10000",
                     ".video0.gopSize 2", ".isp.exposure 33", ".motionDetect.visualize false",
                     ".nightMode.lightMonitor true", ".nightMode.colorToGray true",
                     ".nightMode.autoNightGain 16",
@@ -34,7 +34,7 @@ def test_defaults(root):
     assert "C120_QHD" not in config.read_text()
     assert "BR2_TARGET_ROOTFS_SQUASHFS_EXTREME_COMP=y" in config.read_text()
     assert not (REPO / "general/package/c120-qhd/Config.in").exists()
-    print("PASS C120 defaults: native Majestic, 1440p/20fps, automatic day/night, no preload hook")
+    print("PASS C120 defaults: native Majestic, 1440p/30fps, automatic day/night, no preload hook")
 
 
 def test_pruning(root):
