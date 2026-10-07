@@ -11,7 +11,10 @@ pkg-config --exists libcurl json-c ogg opus zlib || {
     echo "Install the libcurl, json-c, libogg, libopus and zlib development packages" >&2
     exit 1
 }
-python3 -c 'import numpy'
+python3 -c 'import numpy, cryptography, paramiko, tftpy' || {
+    echo "Install the Python dependencies in stock-install/requirements.txt" >&2
+    exit 1
+}
 
 python3 "$base/test_runtime.py"
 python3 "$base/test_qhd.py"
@@ -19,6 +22,8 @@ python3 "$base/test_sc438hai.py"
 node "$base/test_live_audio.cjs"
 node --check "$base/ai-plugin/files/var/www/a/c120-ai.js"
 python3 "$base/ai-plugin/test_actions.py"
+python3 "$base/ai-plugin/test_catalogue.py"
+python3 "$base/ai-plugin/test_recordings_client.py"
 python3 "$base/ai-plugin/test_sound.py"
 python3 "$base/ai-plugin/test_models.py"
 python3 "$base/stock-install/test_c120_install.py"

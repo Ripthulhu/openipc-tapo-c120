@@ -1,0 +1,8 @@
+#!/bin/sh
+# Catalogue locally first. Run only the dispatcher that was configured before install.
+/usr/bin/c120-ai recording-closed "$@"
+if [ -r /etc/c120-recording-hook.previous ] &&
+    [ "$(cat /etc/c120-recording-hook.previous)" = /usr/sbin/record.sh ] &&
+    [ -x /usr/sbin/record.sh ]; then
+    exec /usr/sbin/record.sh "$@"
+fi

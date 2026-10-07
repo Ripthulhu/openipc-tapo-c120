@@ -4,6 +4,77 @@ Dated observations and historical image hashes. These do not describe the bytes
 of a freshly rebuilt image or guarantee long-term stability. Current installation
 and source defaults are in [README.md](README.md).
 
+## HTTP MP4 Stall, 2026-10-07
+
+Cam4 (.152), Majestic `0ea3123`: the HTTP MP4 path drops video when a GOP
+exceeds its fixed 1 MiB muxer limit. This reproduced with plain `curl`, without
+the AI recorder. A 10-second request at GOP=2 timed out after 18 seconds with
+only 198 video packets and mismatched audio/video durations. Setting
+`records.fragmentMs=250`, `fragmentBytes=262144`, and `queueBytes=524288` did not
+fix that HTTP path; all three were restored.
+
+`video0.gopSize="0.5"` keeps groups small enough without enlarging buffers or
+changing 2560x1440, 30 fps, 10,000 kbit/s CBR, exposure or audio. Cam4 now uses
+that interval, and both C120 variants inherit it as the first-boot default.
+Existing configurations are not silently migrated by plugin installation.
+This is a configuration workaround for the current proprietary muxer, not a
+patch to Majestic itself; more frequent keyframes trade some coding efficiency
+for bounded groups and quicker starts.
+
+Hardware checks:
+- HTTP `duration=10`: 300 video packets over 10.000022 seconds, matching Opus.
+- HTTP `duration=30`: 900 video packets over 30.133354 seconds; audio ended
+  within 0.1 ms of video, and the complete file decoded without errors.
+- The real AI recorder with an explicitly synthetic `integration-test` trigger
+  and a five-second timer saved 135 QHD frames over 4.500025 seconds, Opus audio,
+  JPEG and catalogue metadata, with one completed clip and zero errors. The
+  next-keyframe start and whole-fragment close account for the half-second gap.
+- A separate 30-second RTSP check decoded 899 QHD frames and 1,501 Opus frames.
+- No reboot or reflash; boot ID stayed unchanged. The QHD/defaults and AI action
+  host tests passed. No other camera was changed.
+
+Full visual-recognition-to-recording testing still needs media-memory headroom.
+The SD also remains about 99% full of stock Tapo files, which were not deleted;
+the 30-second AI test correctly refused to start at its test storage limit.
+Automatic recording and outbound webhooks stay disabled on cam4. The current
+GOP change resolves the demonstrated stream stall, not those separate guards.
+
+## Recording Catalogue, 2026-10-07
+
+The optional AI plugin now supplies the version-1 recordings catalogue, stable
+storage-generation cursors, native close-hook integration, AI summary/still
+metadata, and persistent `recording.ready` webhook attempts. The API and a Python
+standard-library client are documented in [ai-plugin/RECORDINGS-API.md](ai-plugin/RECORDINGS-API.md).
+AI retention now evicts oldest closed catalogued clips using `records.maxUsage`;
+native recording keeps Majestic's own oldest-first purge. Test coverage includes
+crash/index repair, filters, cursor expiry, deleted files, path/symlink confinement,
+webhook retry/cancellation/expiry, full storage, open-file protection, and streams
+that must not be published as successfully completed clips.
+
+Cam4 (.152) validated a real native close event, stable IDs through service restarts,
+root authentication and HTTP Range downloads. A synthetic trigger through the real
+AI recorder produced a QHD H.264/Opus file plus a JPEG and correctly labelled
+`integration-test` summary. This does **not** claim a real person was recognized.
+The other cameras were not changed.
+
+At the initial catalogue test, the stock AI engine stayed paused because
+reported free media memory was about 10,527 KiB, below its 11,264 KiB start
+guard. The HTTP MP4 GOP stall was resolved later as described above. Experimental
+buffer and fragment settings were restored; automatic recording and webhooks
+remain disabled on cam4. Full live AI-triggered recording on this Majestic build
+has not been validated on other cameras.
+
+The nearly full cam4 SD still contains stock Tapo preallocated files. These were
+not erased. Retention only manages recordings inside its configured recording
+root, not arbitrary stock files or firmware backups. Cam4's final recording path
+is `/mnt/mmcblk0/recordings/%F`, correcting the nonexistent `mmcblk0p1` mount;
+native/AI recording and both notification channels remain disabled. The example
+client downloaded the test clips, summaries and available stills, then replayed
+its checkpoint without duplicate downloads. The final 30-second RTSP check
+decoded 898 QHD H.264 frames and 1,501 Opus frames at 48 kHz. The boot ID remained
+unchanged, and final available Linux memory was about 9 MiB. The full C120 host
+suite passed, including both pinned stock-installer images.
+
 ## Upstream Refresh, 2026-10-07
 
 Merged firmware `5650e0297260dc312375de6eef4491d3b0ad1d81` onto fork base

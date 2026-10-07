@@ -19,8 +19,8 @@ def test_fat_install():
     with tempfile.TemporaryDirectory(prefix='c120-fat-install-') as folder:
         root = Path(folder)
         source, target = root/'source', root/'target'
-        executable = ['usr/bin/c120-ai', 'usr/lib/c120-ai/c120-aid', 'etc/init.d/S97c120-ai',
-                      'var/www/cgi-bin/c120-ai.cgi', 'var/www/cgi-bin/c120-ai-api.cgi']
+        executable = ['usr/bin/c120-ai', 'usr/bin/c120-recording-closed', 'usr/lib/c120-ai/c120-aid', 'etc/init.d/S97c120-ai',
+                      'var/www/cgi-bin/c120-ai.cgi', 'var/www/cgi-bin/c120-ai-api.cgi', 'var/www/cgi-bin/c120-recordings-api.cgi']
         readonly = ['usr/lib/c120-ai/libmi_ipu.so', 'usr/lib/c120-ai/objects.img.gz',
                     'usr/lib/c120-ai/LICENSE-test', 'var/www/a/c120-ai.js']
         for name in executable + readonly + ['etc/c120-ai.json']:

@@ -33,7 +33,7 @@ def main():
         subprocess.run(['gcc', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-sign-compare',
                         '-DC120_HOST_TEST', '-DOUTSIDE_SPEEX', '-DRANDOM_PREFIX=c120', '-DFLOATING_POINT',
                         '-I'+str(out/'kissfft'), '-I'+str(out/'speex'),
-                        *[str(ROOT/name) for name in ('c120-aid.c', 'sound.c', 'opus-input.c', 'notify.c', 'record.c', 'models.c', 'bird.c')],
+                        *[str(ROOT/name) for name in ('c120-aid.c', 'sound.c', 'opus-input.c', 'notify.c', 'record.c', 'catalogue.c', 'models.c', 'bird.c')],
                         str(out/'kissfft/kiss_fft.c'), str(out/'speex/resample.c'),
                         '-o', str(aid), *libs, '-lm', '-ldl'], check=True)
         subprocess.run([str(aid), '--self-test'], check=True)

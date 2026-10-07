@@ -221,11 +221,32 @@ recording off when AI is the desired trigger.
 
 This external trigger bridge starts at the next MP4 fragment/keyframe and has
 **no pre-roll**. Unlike native motion recording, it allocates no video history in
-RAM. It stops when storage reaches its configured limit; it does not delete old
-clips. Stops flush and rename `.partial` clips; interrupted files retain that
-suffix for recovery, and the last incomplete fragment may not play after a cut.
+RAM. At the storage limit, the catalogue worker deletes the oldest closed,
+catalogued recordings under `records.path` until space is available again.
+Native recording keeps its own Majestic retention policy. Open files, partial
+clips, models and unrelated files are never eviction candidates. Use a dedicated
+recording directory: all imported MP4 recordings below it participate in retention.
+
+Majestic `0ea3123` limits the HTTP MP4 muxer to a 1 MiB GOP. At 10,000 kbit/s,
+use a 0.5-second keyframe interval (`cli -s .video0.gopSize 0.5`); the old C120
+two-second interval overflows that limit and drops video. This is now the C120
+first-boot default, but an existing configuration is preserved by upgrades and
+the plugin does not change it automatically. Resolution, frame rate and bitrate
+stay unchanged. Increasing `system.buffer` or reducing `records.fragmentMs`
+did not fix the HTTP path in cam4 tests. Recheck GOP size if bitrate is raised.
+Normal stops trim the last incomplete MP4 fragment before publishing the clip.
+Failed streams are discarded; files left by a power failure keep their `.partial`
+suffix and are not advertised as completed recordings.
 Changing settings or entering recovery AP mode closes the current AI clip.
 Camera streaming quality settings are never modified.
+
+## Recording Automation API
+
+See [RECORDINGS-API.md](RECORDINGS-API.md) for polling, durable completion webhooks,
+AI summaries, still images, authentication, retention, and a Python download client.
+The machine-readable contract is [recordings-openapi.yaml](recordings-openapi.yaml).
+The AI plugin can be installed independently of the optional Lights/Wi-Fi plugins;
+it integrates with their recovery AP lifecycle when they are present.
 
 ## SD Model Library
 

@@ -24,6 +24,7 @@
 #include "opus-input.h"
 #include "notify.h"
 #include "record.h"
+#include "catalogue.h"
 #include "models.h"
 #include "bird.h"
 
@@ -38,9 +39,10 @@
 #define SOUND_BYTES 480640U
 #define SCL_PROC "/proc/mi_modules/mi_scl/mi_scl0"
 #define LIGHT_SIGNAL "/run/c120-ai-light.signal"
+#define RECORD_REQUEST "/run/c120-recording-request.json"
 
 typedef struct json_object J;
-static volatile sig_atomic_t stopping, reloading, testing_notification;
+static volatile sig_atomic_t stopping, reloading, testing_notification, triggering_record;
 static J *settings, *events, *regions;
 static unsigned frames;
 static unsigned long long sequence;
@@ -129,6 +131,7 @@ static J *defaults(void)
         "\"soundEnabled\":false,\"soundSensitivity\":1,\"soundGainDb\":12,\"soundClasses\":[\"bark\",\"meow\",\"cry\",\"glass\"]}");
     add(o,"notifications",notify_defaults());
     add(o,"recording",record_defaults());
+    add(o,"recordingWebhook",catalogue_defaults());
     text(o,"model","stock"); add(o,"nms",json_object_new_double(.45));
     return o;
 }
@@ -136,12 +139,13 @@ static J *defaults(void)
 static int valid_settings(J *o)
 {
     J *model=field(o,"model"),*nms=field(o,"nms");
-    if (!o || !json_object_is_type(o, json_type_object) || json_object_object_length(o) != 12 ||
+    if (!o || !json_object_is_type(o, json_type_object) || json_object_object_length(o) != 13 ||
         !json_object_is_type(model,json_type_string) ||
         json_object_get_string_len(model)!=(int)strlen(json_object_get_string(model)) || !model_id_valid(json_object_get_string(model)) ||
         (!json_object_is_type(nms,json_type_double) && !json_object_is_type(nms,json_type_int)) ||
         !isfinite(number(o,"nms")) || number(o,"nms")<.05 || number(o,"nms")>.95 ||
-        !notify_valid(field(o,"notifications")) || !record_valid(field(o,"recording"))) return 0;
+        !notify_valid(field(o,"notifications")) || !record_valid(field(o,"recording")) ||
+        !catalogue_valid(field(o,"recordingWebhook"))) return 0;
     if (!json_object_is_type(field(o, "enabled"), json_type_boolean) ||
         !json_object_is_type(field(o, "motionRegions"), json_type_boolean) ||
         !json_object_is_type(field(o, "intervalMs"), json_type_int) ||
@@ -189,6 +193,8 @@ static void read_settings(void)
     if (o && json_object_is_type(o,json_type_object) && json_object_object_length(o)==10 && !field(o,"model") && !field(o,"nms")) {
         text(o,"model","stock"); add(o,"nms",json_object_new_double(.45));
     }
+    if (o && json_object_is_type(o,json_type_object) && json_object_object_length(o)==12 && !field(o,"recordingWebhook"))
+        add(o,"recordingWebhook",catalogue_defaults());
     if (!valid_settings(o)) { json_object_put(o); o = defaults(); }
     json_object_put(settings); settings = o;
 }
@@ -249,7 +255,8 @@ static int token(char out[65], int create)
 
 static void reply(int code, J *o)
 {
-    const char *message = code == 200 ? "OK" : code == 400 ? "Bad Request" : code == 403 ? "Forbidden" :
+    const char *message = code == 200 ? "OK" : code == 202 ? "Accepted" : code == 409 ? "Conflict" : code == 400 ? "Bad Request" : code == 403 ? "Forbidden" :
+        code == 404 ? "Not Found" : code == 410 ? "Gone" :
         code == 405 ? "Method Not Allowed" : code == 503 ? "Service Unavailable" : "Internal Server Error";
     /* Majestic's CGI bridge requires HTTP/1.1 and LF-only header separators. */
     printf("HTTP/1.1 %d %s\nContent-Type: application/json\nCache-Control: no-store\nX-Content-Type-Options: nosniff\n\n%s\n",
@@ -285,6 +292,23 @@ static int api(void)
             json_object_put(o); return error_reply(403, "Invalid request token");
         }
         json_object_object_del(o, "csrf");
+        if (field(o,"recordClipSeconds")) {
+            J *seconds=field(o,"recordClipSeconds");
+            if (json_object_object_length(o)!=1 || !json_object_is_type(seconds,json_type_int) ||
+                json_object_get_int64(seconds)<1 || json_object_get_int64(seconds)>600) {
+                json_object_put(o); return error_reply(400,"recordClipSeconds must be 1 through 600");
+            }
+            pid_t pid=daemon_pid();
+            if (!pid) { json_object_put(o); return error_reply(503,"AI service unavailable"); }
+            J *pending=read_json(RECORD_REQUEST);
+            int busy=pending && now()-number(pending,"monotonic")<5;
+            json_object_put(pending);
+            if (busy) { json_object_put(o); return error_reply(409,"Recording request pending"); }
+            add(o,"monotonic",json_object_new_double(now()));
+            int failed=atomic_json(RECORD_REQUEST,o,0); json_object_put(o);
+            if (failed || kill(pid,SIGUSR2)) { unlink(RECORD_REQUEST); return error_reply(503,"Cannot request recording"); }
+            o=json_object_new_object(); text(o,"status","Recording requested"); reply(202,o); return 0;
+        }
         if (field(o,"modelAction")) {
             read_settings(); J *s=read_json(STATE);
             const char *selected=json_object_get_string(field(settings,"model"));
@@ -312,6 +336,9 @@ static int api(void)
         }
         if (o && json_object_object_length(o)==10 && !field(o,"model") && !field(o,"nms")) {
             read_settings(); add(o,"model",json_object_get(field(settings,"model"))); add(o,"nms",json_object_get(field(settings,"nms")));
+        }
+        if (o && json_object_object_length(o)==12 && !field(o,"recordingWebhook")) {
+            read_settings(); add(o,"recordingWebhook",json_object_get(field(settings,"recordingWebhook")));
         }
         if (!valid_settings(o)) { json_object_put(o); return error_reply(400, "Invalid AI settings"); }
         read_settings();
@@ -765,7 +792,7 @@ static void sound_accept(int winner)
         for (int i = 0; i < 10; ++i) if (sound_history[i] == hit) ++matches;
         if (matches >= 2) {
             sound_current = winner;
-            record_observe(sound_labels[winner]);
+            record_detection(sound_labels[winner],"sound","stock-sound",sound_scores[winner]);
             double t = now();
             if (t-sound_last_seen[winner] > 3 && t-sound_last_event[winner] > 10) {
                 event(sound_labels[winner], "sound", sound_scores[winner]); sound_last_event[winner] = t;
@@ -869,7 +896,7 @@ static void object(J *objects,const char *name,int id,float score,float x1,float
     float xywh[]={x1,y1,x2-x1,y2-y1};
     for (int j=0;j<4;++j) json_object_array_add(box,json_object_new_double(xywh[j]));
     add(o,"box",box); json_object_array_add(objects,o);
-    record_observe(name); notify_observe(name);
+    record_detection(name,"object",active_model.id,score); notify_observe(name);
     int category=!strcmp(name,"person")?0:!strcmp(name,"pet")?1:!strcmp(name,"vehicle")?2:3;
     double t=now();
     if (t<visual_warmup) notify_prime(name);
@@ -975,7 +1002,7 @@ static void state(J *objects)
     json_object_put(o);
 }
 
-static void signal_handler(int sig) { if (sig == SIGHUP) reloading = 1; else if (sig == SIGUSR1) testing_notification = 1; else stopping = 1; }
+static void signal_handler(int sig) { if (sig == SIGHUP) reloading = 1; else if (sig == SIGUSR1) testing_notification = 1; else if (sig == SIGUSR2) triggering_record = 1; else stopping = 1; }
 
 static int selftest(void)
 {
@@ -1032,6 +1059,29 @@ int main(int argc, char **argv)
     return 2;
 #endif
     if (argc == 2 && !strcmp(argv[1], "api")) return api();
+    if ((argc==2 && (!strcmp(argv[1],"recordings-api") || !strcmp(argv[1],"catalogue-worker"))) ||
+        (argc==5 && !strcmp(argv[1],"recording-closed"))) {
+        int is_api=!strcmp(argv[1],"recordings-api");
+        if (!access(AP,F_OK)) return is_api?error_reply(503,"Recordings unavailable in setup AP mode"):1;
+        if (is_api && (!getenv("REQUEST_METHOD") || strcmp(getenv("REQUEST_METHOD"),"GET"))) return error_reply(405,"Use GET");
+        curl_global_init(CURL_GLOBAL_DEFAULT); read_settings(); catalogue_configure(field(settings,"recordingWebhook"));
+        catalogue_recording_enabled(boolean(field(settings,"recording"),"enabled"));
+        /* Only fetch recording storage here; do not initialize IPU, audio or camera devices. */
+        struct body b={0}; CURL *curl=curl_easy_init(); long code=0;
+        if (curl) {
+            curl_easy_setopt(curl,CURLOPT_URL,"http://127.0.0.1/api/v1/config.json");
+            curl_easy_setopt(curl,CURLOPT_NOPROXY,"*"); curl_easy_setopt(curl,CURLOPT_TIMEOUT_MS,1000L);
+            curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,receive); curl_easy_setopt(curl,CURLOPT_WRITEDATA,&b);
+            if (!curl_easy_perform(curl)) curl_easy_getinfo(curl,CURLINFO_RESPONSE_CODE,&code);
+            curl_easy_cleanup(curl);
+        }
+        J *cfg=code==200?parse(b.buf,b.len):NULL; catalogue_storage(field(cfg,"records")); json_object_put(cfg);
+        int rc=0;
+        if (is_api) { int status; J *result=catalogue_query(getenv("QUERY_STRING"),&status); reply(status,result); }
+        else if (argc==5) rc=catalogue_native(argv[2],argv[3],argv[4])?1:0;
+        else catalogue_work();
+        json_object_put(settings); curl_global_cleanup(); return rc;
+    }
     unsigned trial_seconds = 0;
     if (argc == 3 && (!strcmp(argv[1], "--trial") || !strcmp(argv[1], "--trial-sound"))) {
         char *end;
@@ -1039,12 +1089,13 @@ int main(int argc, char **argv)
         if (!*argv[2] || *end || n < 10 || n > 600) return 2;
         trial_seconds = n;
     } else if (argc != 1) return 2;
-    int fd = open(PIDFILE, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
+    int fd = open(PIDFILE, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB)) return 1;
     if (ftruncate(fd, 0) || dprintf(fd, "%d\n", getpid()) < 0) return 1;
     openlog("c120-ai", LOG_PID, LOG_DAEMON);
     signal(SIGTERM, signal_handler); signal(SIGINT, signal_handler); signal(SIGHUP, signal_handler);
     signal(SIGUSR1,signal_handler);
+    signal(SIGUSR2,signal_handler); unlink(RECORD_REQUEST);
     signal(SIGPIPE, SIG_IGN);
     errno = 0;
     if (nice(10) == -1 && errno) syslog(LOG_WARNING, "Cannot lower priority: %s", strerror(errno));
@@ -1059,6 +1110,7 @@ int main(int argc, char **argv)
     }
     notify_configure(field(settings,"notifications"));
     record_configure(field(settings,"recording"));
+    catalogue_configure(field(settings,"recordingWebhook"));
     double last_test = -100;
     double next_attempt = 0, next_check = 0, next_frame = 0, next_state = 0;
     int ready = 0;
@@ -1080,6 +1132,9 @@ int main(int argc, char **argv)
             else if (switched) visual_switch();
             if (!json_object_equal(field(old,"notifications"),field(settings,"notifications"))) notify_configure(field(settings,"notifications"));
             if (!json_object_equal(field(old,"recording"),field(settings,"recording"))) record_configure(field(settings,"recording"));
+            if (!json_object_equal(field(old,"recordingWebhook"),field(settings,"recordingWebhook"))) {
+                catalogue_stop(); catalogue_configure(field(settings,"recordingWebhook"));
+            }
             if (full || changed || switched) { json_object_put(objects); objects=NULL; }
             if (changed || switched) { json_object_put(events); events=json_object_new_array(); }
             json_object_put(old);
@@ -1088,7 +1143,7 @@ int main(int argc, char **argv)
         if (start >= next_check || !access(AP, F_OK)) {
             next_check = start+2; ready = 0;
             int visual = boolean(settings, "enabled"), sound = boolean(settings, "soundEnabled");
-            if (!visual && !sound) reason = "Disabled";
+            if (!visual && !sound) { if (access(AP,F_OK)) pipeline(700L); reason = "Disabled"; }
             else if (!access(AP, F_OK)) reason = "Paused: setup AP";
             else if (memory_kb() < (device_ready ? 3000u : 4096u) ||
                 mma_kb() < (device_ready ? 1536u : visual ? 11264u : 2048u)) reason = "Paused: low memory";
@@ -1121,6 +1176,12 @@ int main(int argc, char **argv)
             else { engine_stop(); reason = "Waiting for analysis frames"; sound_reason = reason; next_attempt = now()+5; }
         }
         if (ready && sound_channel_ready) audio_poll();
+        if (triggering_record) {
+            triggering_record=0; J *request=read_json(RECORD_REQUEST); unlink(RECORD_REQUEST);
+            if (access(AP,F_OK) && now()-number(request,"monotonic")>=0 && now()-number(request,"monotonic")<5)
+                record_trigger((unsigned)number(request,"recordClipSeconds"));
+            json_object_put(request);
+        }
         if (access(AP,F_OK)) {
             if (testing_notification) {
                 testing_notification = 0;
@@ -1131,13 +1192,13 @@ int main(int argc, char **argv)
                     notify_event(e); json_object_put(e); last_test = now();
                 }
             }
-            notify_poll(); record_poll();
-        } else record_stop();
+            notify_poll(); record_poll(); catalogue_poll();
+        } else { record_stop(); catalogue_stop(); }
         if (start >= next_state) { state(json_object_get(objects)); next_state = start+.5; }
         usleep(10000);
     }
     engine_stop(); reason = sound_reason = "Service stopped"; state(NULL);
-    notify_stop(); record_stop(); unlink(PIDFILE); close(fd); curl_global_cleanup();
+    notify_stop(); record_stop(); catalogue_stop(); unlink(PIDFILE); close(fd); curl_global_cleanup();
     json_object_put(objects); json_object_put(events); json_object_put(regions); json_object_put(settings);
     return 0;
 }

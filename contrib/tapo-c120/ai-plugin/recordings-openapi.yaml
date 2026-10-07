@@ -1,0 +1,127 @@
+openapi: 3.1.0
+info:
+  title: OpenIPC Recording Catalogue
+  version: 1.0.0
+  description: Read-only optional AI-plugin API. Use root authentication on local HTTPS/LAN/VPN.
+servers:
+  - url: /
+security:
+  - cameraBasic: []
+  - cameraDigest: []
+paths:
+  /cgi-bin/c120-recordings-api.cgi:
+    get:
+      operationId: recordings
+      summary: List completed recordings or retrieve one clip
+      description: id is exclusive of all other parameters. Keep filters fixed across cursor pages. UTC time filters are exclusive and apply to catalogue completion, not scene time.
+      parameters:
+        - {name: id, in: query, schema: {$ref: '#/components/schemas/RecordingId'}}
+        - {name: cursor, in: query, schema: {type: string}, description: Opaque nextCursor from the preceding page}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: category, in: query, schema: {$ref: '#/components/schemas/Category'}}
+        - {name: source, in: query, schema: {type: string, enum: [ai, manual, native, imported]}}
+        - {name: after, in: query, schema: {type: string, format: date-time}, example: '2026-10-07T12:00:00Z'}
+        - {name: before, in: query, schema: {type: string, format: date-time}, example: '2026-10-08T12:00:00Z'}
+      responses:
+        '200':
+          description: A page, or a detail object when id was supplied
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/Page'
+                  - $ref: '#/components/schemas/Detail'
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {description: Root authentication required}
+        '403': {description: Account is not authorized for this administrative CGI}
+        '404': {$ref: '#/components/responses/Error'}
+        '405': {$ref: '#/components/responses/Error'}
+        '410': {description: Cursor belongs to another storage generation; explicitly start a fresh scan}
+        '503': {description: Storage/catalogue unavailable or setup AP active; retry later}
+webhooks:
+  recordingReady:
+    post:
+      summary: Optional completion delivery to the configured recordingWebhook URL
+      description: At-least-once attempts for up to 24 hours. Deduplicate by cameraId and recordingId. Full clip detail, no media bytes. Relative URLs refer to the originating camera.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [schemaVersion, type, cameraId, recordingId, recording]
+              properties:
+                schemaVersion: {type: integer, const: 1}
+                type: {type: string, const: recording.ready}
+                cameraId: {type: string}
+                recordingId: {$ref: '#/components/schemas/RecordingId'}
+                recording: {$ref: '#/components/schemas/Recording'}
+      responses:
+        '204': {description: Accepted; any 2xx acknowledges delivery}
+components:
+  securitySchemes:
+    cameraBasic: {type: http, scheme: basic}
+    cameraDigest: {type: http, scheme: digest}
+  responses:
+    Error:
+      description: Invalid request, missing clip, or unsupported method
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              schemaVersion: {type: integer, const: 1}
+              error: {type: string}
+  schemas:
+    RecordingId: {type: string, pattern: '^[0-9a-f]{16}-[0-9]{20}$'}
+    Category: {type: string, enum: [person, pet, vehicle, bird, bark, meow, cry, glass]}
+    NullableTime: {type: [string, 'null'], format: date-time}
+    Recording:
+      type: object
+      required: [id, cameraId, source, state, bytes, startedAt, endedAt, completedAt, durationSeconds, durationAccuracy, classification, detections, videoUrl, snapshotUrl, snapshotCapturedAt]
+      properties:
+        id: {$ref: '#/components/schemas/RecordingId'}
+        cameraId: {type: string}
+        source: {type: string, enum: [ai, manual, native, imported]}
+        state: {type: string, const: complete}
+        bytes: {type: integer, minimum: 1}
+        startedAt: {$ref: '#/components/schemas/NullableTime'}
+        endedAt: {type: string, format: date-time}
+        completedAt: {type: string, format: date-time}
+        durationSeconds: {type: [number, 'null'], minimum: 0}
+        durationAccuracy: {type: string, enum: [estimated, unknown]}
+        classification: {type: string, enum: [ai, unclassified]}
+        detections:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            required: [category, type, model, maxConfidence, firstSeen, lastSeen]
+            properties:
+              category: {$ref: '#/components/schemas/Category'}
+              type: {type: string, enum: [object, sound]}
+              model: {type: string}
+              maxConfidence: {type: number, minimum: 0, maximum: 1}
+              firstSeen: {type: string, format: date-time}
+              lastSeen: {type: string, format: date-time}
+        videoUrl: {type: string, description: Encoded origin-relative URL; native file server supports Range}
+        snapshotUrl: {type: [string, 'null'], description: Encoded origin-relative URL or null}
+        snapshotCapturedAt: {$ref: '#/components/schemas/NullableTime'}
+    Detail:
+      allOf:
+        - $ref: '#/components/schemas/Recording'
+        - type: object
+          required: [schemaVersion]
+          properties:
+            schemaVersion: {type: integer, const: 1}
+    Page:
+      type: object
+      required: [schemaVersion, cameraId, storageGeneration, recordings, nextCursor, hasMore]
+      properties:
+        schemaVersion: {type: integer, const: 1}
+        cameraId: {type: string}
+        storageGeneration: {type: string}
+        recordings: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/Recording'}}
+        nextCursor: {type: string}
+        hasMore: {type: boolean}
