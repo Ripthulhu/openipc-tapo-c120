@@ -111,7 +111,7 @@ cat <<HTML
 <html>
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>C120 Light Pins</title>
+<title>Light Pins</title>
 <style>
 body{font-family:sans-serif;margin:24px;max-width:560px;background:#25292c;color:#f4f7fb}
 a{color:#58a6ff}
@@ -124,7 +124,7 @@ pre{background:#343a40;padding:12px;overflow:auto}
 </style>
 </head>
 <body>
-<h1>C120 Light Pins</h1>
+<h1>Light Pins</h1>
 HTML
 
 [ -n "$message" ] && printf '<p class="ok">%s</p>\n' "$(printf '%s' "$message" | html_escape)"

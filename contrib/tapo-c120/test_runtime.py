@@ -1,6 +1,7 @@
 """Run on Linux with gcc and Haserl. GPIOs/services are simulated under a temp directory."""
 import os
 import fcntl
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
@@ -8,6 +9,7 @@ from pathlib import Path
 import signal
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -15,6 +17,70 @@ from urllib.parse import urlencode
 
 
 BASE = Path(__file__).resolve().parent
+
+
+def test_payloads():
+    ap = BASE / 'ap-recovery-plugin'
+    runtime = BASE / 'runtime-overlay'
+    assert not (ap / 'files/usr/bin/c120-eventd').exists()
+    assert not (runtime / 'usr/bin/c120-eventd').exists()
+    assert not (ap / 'files/etc/init.d/S45c120-ap-button').exists()
+    assert (ap / 'files/usr/bin/c120-button-apd').read_bytes() == (runtime / 'usr/bin/c120-button-apd').read_bytes()
+    with tempfile.TemporaryDirectory(prefix='c120-package-') as temp:
+        root = Path(temp)
+        # Host compilation exercises packaging only, not the target ABI.
+        compiler = root / 'host-package-cc'
+        write(compiler, '#!/bin/sh\nif [ "$1" = -dumpmachine ]; then\n'
+              'echo arm-openipc-linux-musleabihf\nelse\nexec "${HOSTCC:-gcc}" "$@"\nfi\n')
+        compiler.chmod(0o755)
+        out = root / 'build with spaces'
+        env = dict(os.environ, CC=str(compiler))
+        command = ['sh', str(BASE / 'build-plugin.sh'), str(out)]
+        rejected = subprocess.run(command, env=dict(env, CC=os.environ.get('HOSTCC', 'gcc')),
+                                  capture_output=True, text=True)
+        assert rejected.returncode != 0 and 'ARM hard-float musl' in rejected.stderr
+        for _ in range(2):
+            subprocess.run(command, env=env, check=True, capture_output=True)
+            binary = (out / 'c120-eventd').read_bytes()
+            for name, prefix in (('openipc-c120-ap-recovery-plugin', 'files'),
+                                 ('openipc-c120-runtime', 'runtime-overlay')):
+                with tarfile.open(out / f'{name}.tgz') as archive:
+                    packaged = archive.extractfile(f'{name}/{prefix}/usr/bin/c120-eventd').read()
+                    digest, path = archive.extractfile(f'{name}/eventd.sha256').read().decode().split()
+                    assert packaged == binary
+                    assert path == f'{prefix}/usr/bin/c120-eventd'
+                    assert hashlib.sha256(packaged).hexdigest() == digest
+                    init = archive.extractfile(f'{name}/{prefix}/etc/init.d/S45c120-ap-button').read()
+                    assert init == (runtime / 'etc/init.d/S45c120-ap-button').read_bytes()
+                    installer = 'install.sh' if prefix == 'files' else 'install-runtime.sh'
+                    assert archive.extractfile(f'{name}/{installer}').read() == (ap / installer if prefix == 'files' else BASE / installer).read_bytes()
+                    assert archive.getmember(f'{name}/{prefix}/usr/bin/c120-eventd').mode & 0o111
+                    if prefix == 'files':
+                        assert archive.extractfile(f'{name}/hostapd-overlay.tgz').read() == (ap / 'hostapd-overlay.tgz').read_bytes()
+                    else:
+                        for asset in ('dashboard-luminance.sed', 'floodlight-url.html', 'live-audio.html'):
+                            assert archive.extractfile(f'{name}/{asset}').read() == (BASE / asset).read_bytes()
+            assert not list(out.glob('.packages.*')), 'packaging left temporary files'
+        assert not (ap / 'files/usr/bin/c120-eventd').exists()
+        assert not (runtime / 'usr/bin/c120-eventd').exists()
+    plugin = BASE / 'ai-plugin'
+    scripts = [path for directory in (BASE, ap, plugin, BASE / 'ai-probe')
+               for path in directory.glob('*.sh')]
+    for overlay in (ap / 'files', runtime, plugin / 'files'):
+        scripts.extend(path for path in overlay.rglob('*') if path.is_file())
+    for path in scripts:
+        with path.open('rb') as source:
+            shell = source.read(64).startswith(b'#!/bin/sh\n')
+        if shell:
+            subprocess.run(['sh', '-n', str(path)], check=True)
+    # AI backups contain notification secrets; exercise the actual installer umask.
+    with tempfile.TemporaryDirectory() as temp:
+        backup = Path(temp) / 'backup.tar'
+        prefix = (plugin / 'install.sh').read_text().split('src=')[0]
+        subprocess.run(['sh', '-c', 'umask 000\n' + prefix + '\n: > "$1"',
+                        'test-backup', str(backup)], check=True)
+        assert backup.stat().st_mode & 0o077 == 0
+    print('PASS payloads: one build, self-contained recovery/runtime packages, checksums, no source binaries')
 
 
 def write(path, data):
@@ -82,7 +148,8 @@ def test_daemon(root):
     white = root / "sys/class/gpio/gpio14/value"
 
     def run(command, expected=0):
-        result = subprocess.run([str(binary), command], capture_output=True, text=True)
+        command = [command] if isinstance(command, str) else command
+        result = subprocess.run([str(binary), *command], capture_output=True, text=True)
         assert result.returncode == expected, result.stderr
         return result.stdout
 
@@ -261,6 +328,75 @@ if [ "$1" = start ]; then touch '{apstate}'; else rm -f '{apstate}'; fi
         time.sleep(0.15)
         assert not motion_state.exists()
         trigger()
+        manual = root / "run/c120-floodlight.manual"
+        ir_before = (leader.read_text(), follower.read_text(), state.exists())
+        assert json.loads(run(["floodlight", "on"]))["manual"] is True
+        assert not motion_state.exists(), "manual floodlight did not take ownership"
+        stamp = white.stat().st_mtime_ns
+        assert json.loads(run(["floodlight", "on"]))["white"] is True
+        assert white.stat().st_mtime_ns == stamp, "idempotent on rewrote GPIO"
+        metrics["count"] += 10
+        time.sleep(1.2)
+        assert white.read_text().strip() == "1" and not motion_state.exists(), "timer overrode manual floodlight"
+        assert json.loads(run(["floodlight", "status"])) == {"white": True, "manual": True, "available": True}
+        with (root / "run/c120-lamps.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            run(["floodlight", "toggle"], 1)
+        assert white.read_text().strip() == "1", "busy command changed floodlight"
+        write(config, 'C120_CAMERA_LIGHT_PINS="12 14"\n')
+        run(["floodlight", "off"], 1)
+        assert json.loads(run(["floodlight", "status"]))["available"] is False
+        write(config, 'C120_CAMERA_LIGHT_PINS=""\n')
+        run(["floodlight", "invalid"], 2)
+        assert json.loads(run(["floodlight", "toggle"]))["white"] is False
+        assert not manual.exists(), "off did not release manual ownership"
+        assert (leader.read_text(), follower.read_text(), state.exists()) == ir_before, "floodlight changed IR policy"
+        metrics["count"] += 1
+        time.sleep(0.08)
+        assert white.read_text().strip() == "0", "manual-off exposure change retriggered timer"
+        time.sleep(0.2)
+        trigger()
+        # AI presence is already confidence/ROI filtered; do not use raw motion counts.
+        signal_file = root / 'run/c120-ai-light.signal'
+        def presence(mask, age=0, interval=500):
+            write(signal_file, f'1 100 {int(time.monotonic()*1000)-age} {interval} {mask}\n')
+        write(motion_config, 'C120_MOTION_LIGHT_ENABLED="1"\nC120_MOTION_LIGHT_SECONDS="1"\n'
+              'C120_MOTION_LIGHT_TRIGGER_SECONDS="0"\nC120_MOTION_LIGHT_SOURCE="ai"\nC120_MOTION_LIGHT_AI_MASK="1"\n')
+        presence(2)
+        run('reload')
+        wait_for(lambda: white.read_text().strip() == '0')
+        time.sleep(.2)
+        metrics['count'] += 100
+        assert white.read_text().strip() == '0', 'unselected pet/raw motion triggered AI-person light'
+        assert motion_status()['source'] == 'ai' and motion_status()['detectorRunning']
+        presence(1)
+        wait_for(lambda: white.read_text().strip() == '1')
+        presence(1,age=10000)
+        wait_for(lambda: white.read_text().strip() == '0')
+        assert not motion_status()['detectorRunning'], 'stale AI signal reported running'
+        for invalid in ('2 100 0 500 1', '1 100 0 500 8', 'malformed'):
+            write(signal_file,invalid+'\n'); time.sleep(.1)
+            assert white.read_text().strip() == '0'
+        write(motion_config, motion_config.read_text().replace('TRIGGER_SECONDS="0"','TRIGGER_SECONDS="3"'))
+        run('reload'); time.sleep(.2)
+        started = time.monotonic(); presence(1,interval=5000)
+        wait_for(lambda: white.read_text().strip() == '1',timeout=4)
+        assert time.monotonic()-started >= 3, 'AI presence bypassed sustained-detection delay'
+        presence(0)
+        wait_for(lambda: white.read_text().strip() == '0')
+        presence(1); signal_file.unlink()
+        time.sleep(.15)
+        assert white.read_text().strip() == '0', 'missing AI detector signal retriggered light'
+        write(config, 'C120_CAMERA_LIGHT_PINS="12"\nC120_LIGHT_PINS_RESPECT_EXCLUSIVE="1"\n')
+        write(motion_config, 'C120_MOTION_LIGHT_ENABLED="1"\nC120_MOTION_LIGHT_SECONDS="1"\n'
+              'C120_MOTION_LIGHT_TRIGGER_SECONDS="0"\nC120_MOTION_LIGHT_SOURCE="ai"\nC120_MOTION_LIGHT_AI_MASK="8"\n')
+        run('reload'); time.sleep(.2)
+        presence(1); time.sleep(.15)
+        assert white.read_text().strip() == '0', 'bird-only light accepted a person'
+        presence(8)
+        wait_for(lambda: white.read_text().strip() == '1')
+        presence(0)
+        wait_for(lambda: white.read_text().strip() == '0')
         run("stop")
         process.wait(timeout=2)
         assert not pidfile.exists(), "owner PID was not removed"
@@ -279,6 +415,8 @@ if [ "$1" = start ]; then touch '{apstate}'; else rm -f '{apstate}'; fi
         server.server_close()
     print("PASS native daemon: GPIO, configuration, singleton, reload, button toggling, shutdown")
     print("PASS motion floodlight: ROI-filtered events, sustained-motion delay, night gate, timer/retrigger, native failures, AP, manual ownership, restart cleanup")
+    print("PASS floodlight URL helper: atomic toggle, idempotent on, manual ownership, IR preservation, busy/conflict guards")
+    print("PASS AI floodlight: selected categories, raw-motion exclusion, fresh presence, stale/malformed/missing signals, sustained delay at slow analysis interval")
 
 
 def test_ap(root):
@@ -339,38 +477,50 @@ def test_forms(root):
     helper.chmod(0o755)
     motion_config = root / "etc/c120-motion-light.conf"
     event_helper = root / "c120-eventd"
+    flood_calls = root / "floodlight-calls"
     write(event_helper, f'''#!/bin/sh
 case "$1" in
 status) echo eventd=running ;;
 reload) : ;;
+floodlight)
+echo "$2" >> '{flood_calls}'
+printf '{{"white":false,"manual":false,"available":true}}\\n'
+;;
 motion-status)
 C120_MOTION_LIGHT_ENABLED=0
 C120_MOTION_LIGHT_SECONDS=30
 C120_MOTION_LIGHT_TRIGGER_SECONDS=3
+C120_MOTION_LIGHT_SOURCE=motion
+C120_MOTION_LIGHT_AI_MASK=1
 [ ! -f '{motion_config}' ] || . '{motion_config}'
 [ "$C120_MOTION_LIGHT_ENABLED" = 1 ] && enabled=true || enabled=false
-printf '{{"enabled":%s,"seconds":%s,"triggerSeconds":%s,"active":false,"remaining":0,"running":true,"available":true}}\\n' "$enabled" "$C120_MOTION_LIGHT_SECONDS" "$C120_MOTION_LIGHT_TRIGGER_SECONDS"
+printf '{{"enabled":%s,"seconds":%s,"triggerSeconds":%s,"active":false,"remaining":0,"running":true,"available":true,"source":"%s","aiMask":%s,"detectorRunning":true}}\\n' "$enabled" "$C120_MOTION_LIGHT_SECONDS" "$C120_MOTION_LIGHT_TRIGGER_SECONDS" "$C120_MOTION_LIGHT_SOURCE" "$C120_MOTION_LIGHT_AI_MASK"
 ;;
 esac
 ''')
     event_helper.chmod(0o755)
+    lamp_helper = root / "c120-lamps"
+    lamp_calls = root / "lamp-calls"
+    write(lamp_helper, f'#!/bin/sh\necho "$1" >> "{lamp_calls}"\nprintf \'{{"mode":"%s"}}\\n\' "$1"\n')
+    lamp_helper.chmod(0o755)
     mocks = f'''
 fw_setenv() {{ printf '%s\\0' "$@" >> '{calls}'; }}
 nohup() {{ :; }}
 cli() {{ :; }}
 '''
 
-    def render(path, fields=None, cookie="", method="GET", referer="http://camera.local/cgi-bin/c120-lights.cgi", origin="http://camera.local"):
+    def render(path, fields=None, cookie="", method="GET", referer="http://camera.local/cgi-bin/c120-lights.cgi", origin="http://camera.local", query=None):
         script = re.sub(r"/(?:etc|tmp)/", lambda match: str(root) + match[0],
                         (BASE / path).read_text())
         script = script.replace("#!/usr/bin/haserl", "#!" + haserl, 1)
         script = script.replace("/usr/bin/c120-light-pinsd", str(helper))
         script = script.replace("/usr/bin/c120-eventd", str(event_helper))
+        script = script.replace("/usr/bin/c120-lamps", str(lamp_helper))
         script = script.replace("<%", "<%" + mocks, 1)
         page = root / "test.cgi"
         write(page, script)
         data = urlencode(fields or {})
-        env = dict(os.environ, REQUEST_METHOD=method, QUERY_STRING=data if method == "GET" else "",
+        env = dict(os.environ, REQUEST_METHOD=method, QUERY_STRING=query if query is not None else data if method == "GET" else "",
                    HTTP_COOKIE=cookie, HTTP_REFERER=referer, HTTP_ORIGIN=origin,
                    HTTP_HOST="camera.local", CONTENT_TYPE="application/x-www-form-urlencoded",
                    CONTENT_LENGTH=str(len(data)) if method == "POST" else "0")
@@ -379,6 +529,19 @@ cli() {{ :; }}
                                 capture_output=True, check=True)
         assert not result.stderr, result.stderr
         return result.stdout.decode()
+
+    light = "runtime-overlay/var/www/cgi-bin/c120-light.cgi"
+    for mode in ('off', '850', '940', 'both', 'ir', '850940', 'white', 'status'):
+        output = render(light, {'mode': mode})
+        assert output.startswith('HTTP/1.1 200 OK\nContent-type: application/json\n')
+        assert lamp_calls.read_text().splitlines()[-1] == mode
+    render(light, query='mode=%38%35%30')
+    assert lamp_calls.read_text().splitlines()[-1] == '850', 'mode was not URL-decoded'
+    for options in ({'cookie': 'mode=white'}, {'fields': {'mode': 'white'}, 'method': 'POST'},
+                    {'fields': {'mode': 'white;touch injected'}}, {'fields': {'mode': '*'}}):
+        render(light, **options)
+        assert lamp_calls.read_text().splitlines()[-1] == 'status'
+    assert not (root / 'injected').exists()
 
     wifi = "ap-recovery-plugin/files/var/www/cgi-bin/c120-wifi-setup.cgi"
     assert '<form method="get"' in render(wifi, cookie="apply=1; ssid=ignored")
@@ -440,8 +603,37 @@ cli() {{ :; }}
     assert "403 Forbidden" in render(motion, fields, method="POST", origin="http://other.local")
     assert motion_config.read_bytes() == saved, "cross-origin or untrusted request changed settings"
     assert '"enabled":false' in render(motion, fields, method="POST")
+    output = render(motion, {'enabled':'1','seconds':'30','source':'ai','aiMask':'3'},method='POST')
+    assert '"source":"ai"' in output and '"aiMask":3' in output
+    output = render(motion, {'enabled':'1','seconds':'10'},method='POST')
+    assert '"source":"ai"' in output and '"aiMask":3' in output, 'legacy caller reset AI selection'
+    saved = motion_config.read_bytes()
+    for mask in ('8','15'):
+        output = render(motion, {'enabled':'1','seconds':'30','source':'ai','aiMask':mask},method='POST')
+        assert f'"aiMask":{mask}' in output
+    saved = motion_config.read_bytes()
+    for change in [{'source':'ai','aiMask':'0'},{'source':'unknown'},{'aiMask':'16'},{'aiMask':'1;bad'}]:
+        assert '400 Bad Request' in render(motion,{'enabled':'1','seconds':'10',**change},method='POST')
+        assert motion_config.read_bytes() == saved
+    flood = "runtime-overlay/var/www/cgi-bin/c120-floodlight.cgi"
+    output = render(flood, cookie="action=on")
+    assert output.startswith("HTTP/1.1 200 OK\nContent-Type: application/json\nCache-Control: no-store\n")
+    assert flood_calls.read_text() == "toggle\n", "cookie overrode default toggle"
+    for action in ("on", "off", "status", "toggle"):
+        render(flood, {"action": action}, referer="", origin="")
+        assert flood_calls.read_text().splitlines()[-1] == action
+    render(flood, {"action": "off"}, method="POST")
+    assert flood_calls.read_text().splitlines()[-1] == "off"
+    saved = flood_calls.read_bytes()
+    assert "405 Method Not Allowed" in render(flood, method="HEAD")
+    assert "400 Bad Request" in render(flood, {"action": "on;touch injected"})
+    assert "403 Forbidden" in render(flood, referer="http://other.local/page")
+    assert "403 Forbidden" in render(flood, origin="http://other.local")
+    assert flood_calls.read_bytes() == saved, "invalid request reached GPIO helper"
     print("PASS forms: real Haserl decoding, Wi-Fi saves, GPIO settings and validation")
+    print("PASS light CGI: URL decoding, mode whitelist, GET-only input and cookie isolation")
     print("PASS motion form: POST-only writes, same-origin checks, duration bounds, enable/disable")
+    print("PASS floodlight CGI: toggle/on/off/status, GET/POST, cookies, method and origin guards")
 
 
 def test_dashboard(root):
@@ -466,6 +658,20 @@ def test_dashboard(root):
     print("PASS dashboard: raw SDK luminance, automatic range, no 8-bit band, idempotent fixup")
 
 
+def test_endpoint_list(root):
+    root.mkdir(parents=True)
+    page = root / "stream-urls.cgi"
+    page.write_text('<dl>\n<dd>Toggle camera light.</dd>\n</dl>\n')
+    snippet = BASE / "floodlight-url.html"
+    result = subprocess.run(["sed", f'/<dd>Toggle camera light\\.<\\/dd>/r {snippet}', str(page)],
+                            check=True, capture_output=True, text=True).stdout
+    assert result.count('/cgi-bin/c120-floodlight.cgi') == 1
+    assert 'class="ep-host"' in result and 'class="cp2cb"' in result
+    assert 'Toggle white floodlight.' in result
+    assert "! grep -q 'c120-floodlight.cgi'" in (BASE / "install-runtime.sh").read_text()
+    print("PASS endpoint list: existing URL styling and guarded installer insertion")
+
+
 def test_build(root):
     repo = BASE.parents[1]
     for sensor in ("sc430ai", ""):
@@ -488,7 +694,7 @@ include {package}
         if sensor:
             assert copied.read_bytes() == (repo / "sigmastar/infinity6c/sensor_sc430ai_mipi.c").read_bytes()
     fixture = root / "firmware"
-    boards = ["ssc377_lite_tp-link-tapo-c120-v1", "ssc377_lite"]
+    boards = ["ssc377_lite_tp-link-tapo-c120-v1", "ssc377_lite_tp-link-tapo-c120-v1-sc438hai", "ssc377_lite"]
     paths = ["Makefile", "general/openipc.fragment"] + [
         f"br-ext-chip-sigmastar/configs/{board}_defconfig" for board in boards]
     for path in paths:
@@ -503,7 +709,8 @@ include {package}
         config = (fixture / "output/openipc_defconfig").read_text()
         overlays = [line for line in config.splitlines() if line.startswith("BR2_ROOTFS_OVERLAY=")]
         assert "$(BR2_EXTERNAL)/overlay" in overlays[-1]
-        assert ("board/tapo-c120/overlay" in overlays[-1]) == (board == boards[0])
+        assert ("board/tapo-c120/overlay" in overlays[-1]) == (board != boards[-1])
+        assert ("board/tapo-c120-sc438hai/overlay" in overlays[-1]) == (board == boards[1])
     assert not (repo / "general/overlay/usr/share/openipc/customizer.sh").exists()
     config = root / ".config"
     write(config, 'BR2_OPENIPC_SNS_MODEL="sc430ai"\nBR2_PACKAGE_SIGMASTAR_OSDRV_SENSORS=y\n')
@@ -517,14 +724,22 @@ include {package}
     assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
     write(target / "etc/sensors/sc430ai.bin", "fixture\n")
     subprocess.run(check, capture_output=True, check=True)
+    write(config, 'BR2_OPENIPC_SNS_MODEL="sc438hai"\nBR2_PACKAGE_SIGMASTAR_OSDRV_SENSORS=y\n')
+    assert subprocess.run(check, capture_output=True).returncode == 1
+    write(target / "lib/modules/5.10.61/sigmastar/sensor_sc438hai_mipi.ko", "fixture\n")
+    assert subprocess.run(check, capture_output=True).returncode == 1
+    write(target / "etc/sensors/sc438hai.bin", "fixture\n")
+    subprocess.run(check, capture_output=True, check=True)
     print("PASS builds: exact board selection, isolated C120 defaults, local sensor source destination")
 
 
 if __name__ == "__main__":
+    test_payloads()
     with tempfile.TemporaryDirectory(prefix="c120-test-") as tmp:
         root = Path(tmp)
         test_daemon(root / "native")
         test_ap(root / "ap")
         test_forms(root / "forms")
         test_dashboard(root / "dashboard")
+        test_endpoint_list(root / "endpoints")
         test_build(root / "build")

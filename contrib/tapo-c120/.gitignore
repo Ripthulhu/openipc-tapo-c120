@@ -1,0 +1,12 @@
+# Private stock models and vendor inputs are provided by the owner at build time.
+*.img
+*.img.gz
+*.tflite
+*.so
+*.so.*
+
+# Optional local build/cache directories; never runtime payload sources.
+/build/
+/ai-plugin/build/
+/ai-plugin/sound-deps/
+/ai-probe/build/

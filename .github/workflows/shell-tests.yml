@@ -201,10 +201,18 @@ jobs:
           fi
 
   c120-runtime:
-    name: C120 native helper, QHD and AP recovery
+    name: C120 runtime, AI and stock installer
+    if: >-
+      github.repository == 'OpenIPC/firmware' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.repository.private)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y haserl
-      - run: python3 contrib/tapo-c120/test_runtime.py
-      - run: python3 contrib/tapo-c120/test_qhd.py
+      - name: Install host test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc make haserl nodejs python3-numpy pkg-config \
+            ffmpeg curl squashfs-tools libcurl4-openssl-dev libjson-c-dev libogg-dev libopus-dev zlib1g-dev
+      - run: sh contrib/tapo-c120/check.sh

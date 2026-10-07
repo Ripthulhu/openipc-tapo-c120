@@ -25,6 +25,7 @@
 #define LIGHT_CONF C120_ROOT "/etc/c120-light-pins.conf"
 #define MOTION_CONF C120_ROOT "/etc/c120-motion-light.conf"
 #define MOTION_STATE C120_ROOT "/run/c120-motion-light.active"
+#define FLOOD_MANUAL C120_ROOT "/run/c120-floodlight.manual"
 #define LAMP_LOCK C120_ROOT "/run/c120-lamps.lock"
 #define EVENT_PID C120_ROOT "/run/c120-eventd.pid"
 #define BUTTON_PID C120_ROOT "/run/c120-button-apd.pid"
@@ -32,6 +33,7 @@
 #define LOG_PATH C120_ROOT "/tmp/c120-eventd.log"
 #define AP_STATE C120_ROOT "/run/c120-setup-ap.active"
 #define LAMP_STATE C120_ROOT "/tmp/c120-lamps.state"
+#define AI_SIGNAL C120_ROOT "/run/c120-ai-light.signal"
 #define GPIO_ROOT C120_ROOT "/sys/class/gpio"
 
 #define MAX_PINS 16
@@ -57,6 +59,8 @@ struct config {
 	int motion_light_enabled;
 	int motion_light_seconds;
 	int motion_light_trigger_seconds;
+	int motion_light_ai;
+	int motion_light_ai_mask;
 	int pins[MAX_PINS];
 	int pin_count;
 };
@@ -69,6 +73,7 @@ struct motion_light {
 	int have_count;
 	int owned;
 	int was_night;
+	int was_manual;
 };
 
 static volatile sig_atomic_t keep_running = 1;
@@ -228,6 +233,7 @@ static void defaults(struct config *cfg)
 	cfg->log_enabled = 0;
 	cfg->motion_light_seconds = 30;
 	cfg->motion_light_trigger_seconds = 3;
+	cfg->motion_light_ai_mask = 1;
 	cfg->pins[0] = 12;
 	cfg->pins[1] = 13;
 	cfg->pin_count = 2;
@@ -284,6 +290,10 @@ static void parse_config_file(struct config *cfg, const char *path)
 			cfg->motion_light_seconds = parse_int(value, 1, 600, 30);
 		} else if (!strcmp(key, "C120_MOTION_LIGHT_TRIGGER_SECONDS")) {
 			cfg->motion_light_trigger_seconds = parse_int(value, 0, 600, 3);
+		} else if (!strcmp(key, "C120_MOTION_LIGHT_SOURCE")) {
+			cfg->motion_light_ai = !strcmp(value,"ai") ? 1 : !strcmp(value,"motion") ? 0 : -1;
+		} else if (!strcmp(key, "C120_MOTION_LIGHT_AI_MASK")) {
+			cfg->motion_light_ai_mask = parse_int(value,0,15,0);
 		}
 	}
 
@@ -535,6 +545,20 @@ static int lamp_lock(void)
 	return fd;
 }
 
+static int ai_presence(unsigned long long *frame, unsigned *classes)
+{
+	char line[128], extra;
+	unsigned version, interval;
+	unsigned long long stamp;
+	long long now = monotonic_ms();
+	if (read_first_line(AI_SIGNAL,line,sizeof(line)) ||
+	    sscanf(line,"%u %llu %llu %u %u %c",&version,frame,&stamp,&interval,classes,&extra) != 5 ||
+	    version != 1 || *classes > 15 || interval < 500 || interval > 5000 ||
+	    stamp > (unsigned long long)now || (unsigned long long)now-stamp > interval+1000U)
+		return -1;
+	return 0;
+}
+
 static void motion_release(struct motion_light *state)
 {
 	/* Manual lamp commands remove the ownership marker while holding this lock. */
@@ -564,13 +588,15 @@ static void motion_cancel(struct motion_light *state)
 static void motion_poll(const struct config *cfg, struct motion_light *state)
 {
 	unsigned long long night = 0, count = 0;
-	int valid = 0, moved, fd;
+	int valid = 0, moved, fd, manual;
 	char mode[32] = "";
 	long long now;
+	unsigned classes = 0;
 
-	if (cfg->motion_light_enabled && motion_pin_available(cfg) && !file_exists(AP_STATE))
+	if (cfg->motion_light_enabled && cfg->motion_light_ai >= 0 && motion_pin_available(cfg) && !file_exists(AP_STATE))
 		valid = http_metric("/metrics/night", "night_enabled", &night) == 0 && night <= 1 &&
-		    http_metric("/metrics/motion", "md_rects_acc_total", &count) == 0;
+		    (cfg->motion_light_ai ? ai_presence(&count,&classes) == 0 :
+		    http_metric("/metrics/motion", "md_rects_acc_total", &count) == 0);
 	now = monotonic_ms();
 	fd = lamp_lock();
 	if (fd < 0) {
@@ -584,7 +610,12 @@ static void motion_poll(const struct config *cfg, struct motion_light *state)
 		state->ignore_until = now + C120_LIGHT_SETTLE_MS;
 	}
 	read_first_line(LAMP_STATE, mode, sizeof(mode));
-	moved = valid && state->have_count && count > state->count;
+	manual = file_exists(FLOOD_MANUAL) || !strcmp(mode, "white");
+	if (manual != state->was_manual)
+		state->ignore_until = now + C120_LIGHT_SETTLE_MS;
+	state->was_manual = manual;
+	moved = valid && (cfg->motion_light_ai ? (classes & cfg->motion_light_ai_mask) != 0 :
+	    state->have_count && count > state->count);
 	state->count = count;
 	state->have_count = valid;
 	if (valid && (int)night != state->was_night)
@@ -595,7 +626,7 @@ static void motion_poll(const struct config *cfg, struct motion_light *state)
 		state->motion_since = 0;
 	else if (!state->motion_since)
 		state->motion_since = now;
-	if (!valid || !night || file_exists(AP_STATE) || !strcmp(mode, "white")) {
+	if (!valid || !night || file_exists(AP_STATE) || manual) {
 		motion_release(state);
 	} else if (moved && now >= state->ignore_until && (state->owned ||
 	    now - state->motion_since >= (long long)cfg->motion_light_trigger_seconds * 1000)) {
@@ -632,6 +663,8 @@ static int motion_status_cmd(void)
 	char buf[64];
 	long long deadline = 0, remaining = 0;
 	int active;
+	unsigned long long frame;
+	unsigned classes;
 
 	load_config(&cfg);
 	if (read_first_line(MOTION_STATE, buf, sizeof(buf)) == 0)
@@ -640,12 +673,63 @@ static int motion_status_cmd(void)
 	if (active && deadline > monotonic_ms())
 		remaining = (deadline - monotonic_ms() + 999) / 1000;
 	printf("{\"enabled\":%s,\"seconds\":%d,\"triggerSeconds\":%d,\"active\":%s,\"remaining\":%lld,"
-	    "\"running\":%s,\"available\":%s}\n",
+	    "\"running\":%s,\"available\":%s,\"source\":\"%s\",\"aiMask\":%d,\"detectorRunning\":%s}\n",
 	    cfg.motion_light_enabled ? "true" : "false", cfg.motion_light_seconds,
 	    cfg.motion_light_trigger_seconds,
 	    active ? "true" : "false", remaining,
-	    daemon_pid() > 0 ? "true" : "false", motion_pin_available(&cfg) ? "true" : "false");
+	    daemon_pid() > 0 ? "true" : "false", motion_pin_available(&cfg) ? "true" : "false",
+	    cfg.motion_light_ai ? "ai" : "motion",cfg.motion_light_ai_mask,
+	    ai_presence(&frame,&classes) == 0 && !file_exists(AP_STATE) ? "true" : "false");
 	return 0;
+}
+
+static int floodlight_cmd(const char *action)
+{
+	struct config cfg;
+	int fd, value, desired, manual, available, result = 1;
+	int change = strcmp(action, "status") != 0;
+
+	if (change && strcmp(action, "toggle") && strcmp(action, "on") && strcmp(action, "off"))
+		return 2;
+	load_config(&cfg);
+	available = motion_pin_available(&cfg);
+	if (change && !available) {
+		fprintf(stderr, "Floodlight GPIO is assigned to another control\n");
+		return 1;
+	}
+	fd = lamp_lock();
+	if (fd < 0)
+		return 1;
+	value = gpio_read_value(WHITE_GPIO, -1);
+	if (value < 0)
+		goto done;
+	manual = file_exists(FLOOD_MANUAL);
+	if (change) {
+		desired = !strcmp(action, "toggle") ? !value : !strcmp(action, "on");
+		if (desired) {
+			int marker = open(FLOOD_MANUAL, O_CREAT | O_WRONLY | O_CLOEXEC, 0600);
+			if (marker < 0)
+				goto done;
+			close(marker);
+		}
+		if (gpio_write_value(WHITE_GPIO, desired) < 0) {
+			if (!manual)
+				unlink(FLOOD_MANUAL);
+			goto done;
+		}
+		/* The same lock protects the timer marker and the physical toggle. */
+		unlink(MOTION_STATE);
+		if (!desired)
+			unlink(FLOOD_MANUAL);
+		value = desired;
+	}
+	printf("{\"white\":%s,\"manual\":%s,\"available\":%s}\n",
+	    value ? "true" : "false", file_exists(FLOOD_MANUAL) ? "true" : "false",
+	    available ? "true" : "false");
+	result = 0;
+done:
+	close(fd);
+	return result;
 }
 
 static void write_pid_file(const char *path)
@@ -853,7 +937,7 @@ static int status_cmd(void)
 
 static void usage(const char *argv0)
 {
-	fprintf(stderr, "usage: %s [daemon|status|motion-status|sync|reload|stop]\n", argv0);
+	fprintf(stderr, "usage: %s [daemon|status|motion-status|sync|reload|stop|floodlight [toggle|on|off|status]]\n", argv0);
 }
 
 int main(int argc, char **argv)
@@ -867,6 +951,8 @@ int main(int argc, char **argv)
 		return status_cmd();
 	if (!strcmp(cmd, "motion-status"))
 		return motion_status_cmd();
+	if (!strcmp(cmd, "floodlight"))
+		return floodlight_cmd(argc > 2 ? argv[2] : "toggle");
 	if (!strcmp(cmd, "sync")) {
 		struct config cfg;
 		load_config(&cfg);

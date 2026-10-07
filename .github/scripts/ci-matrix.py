@@ -50,7 +50,8 @@ ALL_BOARDS = [
     # Sigmastar [I6B]
     "ssc333_lite", "ssc335_lite", "ssc335de_lite", "ssc337_lite", "ssc337de_lite",
     # Sigmastar [I6C]
-    "ssc377_lite", "ssc377_lite_tp-link-tapo-c120-v1", "ssc377d_lite", "ssc377de_lite", "ssc377qe_lite",
+    "ssc377_lite", "ssc377_lite_tp-link-tapo-c120-v1", "ssc377_lite_tp-link-tapo-c120-v1-sc438hai",
+    "ssc377d_lite", "ssc377de_lite", "ssc377qe_lite",
     "ssc378de_lite", "ssc378qe_lite",
     # Sigmastar [I6E]
     "ssc30kd_lite", "ssc30kq_lite", "ssc338q_lite",
@@ -519,7 +520,9 @@ class Tree:
 
     def boards_for_family(self, vendor_dir, family):
         if (vendor_dir, family) == ("br-ext-chip-sigmastar", "tapo-c120"):
-            return [b for b in self.built if b == "ssc377_lite_tp-link-tapo-c120-v1"]
+            return [b for b in self.built if b.startswith("ssc377_lite_tp-link-tapo-c120-v1")]
+        if (vendor_dir, family) == ("br-ext-chip-sigmastar", "tapo-c120-sc438hai"):
+            return [b for b in self.built if b == "ssc377_lite_tp-link-tapo-c120-v1-sc438hai"]
         return [b for b in self.built
                 if self.boards[b]["vendor_dir"] == vendor_dir
                 and self.boards[b]["family"] == family]
@@ -887,11 +890,15 @@ def self_test():
         (["general/package/uclibc-compat/src/uclibc-compat-static.c"],
          3, "reached via .mk _DEPENDENCIES"),
         (["general/package/sigmastar-osdrv-sensors/Config.in"],
-         25, "reached via Config.in select"),
+         26, "reached via Config.in select"),
         # Shared packages narrow too, just barely.
-        (["general/package/majestic/majestic.mk"], 90, "majestic is nearly everywhere"),
+        (["general/package/majestic/majestic.mk"], 91, "majestic is nearly everywhere"),
         # Board configs and kernel configs.
         (["br-ext-chip-goke/configs/gk7205v200_lite_defconfig"], 1, "one defconfig"),
+        (["br-ext-chip-sigmastar/board/tapo-c120/overlay/usr/share/openipc/customizer.sh"],
+         2, "common C120 settings cover both sensors"),
+        (["br-ext-chip-sigmastar/board/tapo-c120-sc438hai/overlay/etc/default/majestic"],
+         1, "SC438HAI tuning stays sensor-specific"),
         (["br-ext-chip-hisilicon/board/hi3516ev200/hi3516ev300.generic.config"],
          8, "kernel config narrows to its family"),
         (["general/package/hisilicon-osdrv-hi3516cv200/files/script/load_hisilicon",
@@ -977,7 +984,7 @@ def self_test():
         (["LICENSES/vendor.txt"], full, "LICENSES/ is not the licence file"),
         (["READMEgenerator.c"], full, "README prefix is not a readme"),
         (["general/package/majestic/README.md"],
-         90, "markdown inside a package is that package"),
+         91, "markdown inside a package is that package"),
         (["br-ext-chip-hisilicon/board/hi3516ev200/NOTES.md"],
          8, "markdown inside a board dir is that family"),
         (["general/scripts/pr_compliance_checklist.yaml"],

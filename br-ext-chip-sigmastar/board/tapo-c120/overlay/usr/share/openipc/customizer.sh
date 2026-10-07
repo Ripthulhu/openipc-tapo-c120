@@ -2,7 +2,7 @@
 
 # Installed only by the TP-Link Tapo C120 board profile.
 
-fw_setenv sensor sc430ai
+fw_setenv sensor "$(cat /etc/c120-sensor-model 2>/dev/null || echo sc430ai)"
 fw_setenv srcfg '0 1 1 0 1 1'
 fw_setenv wlandev rtl8188fu-ssc377-tapo-c120
 fw_setenv bootdelay 1
@@ -41,11 +41,13 @@ cli -s .jpeg.enabled false
 
 cli -s .audio.enabled true
 cli -s .audio.codec opus
-cli -s .audio.srate 8000
+cli -s .audio.srate 48000
 cli -s .audio.volume 50
 cli -s .audio.speakerPin 43
-cli -s .audio.outputEnabled false
-cli -s .audio.outputVolume 30
+cli -s .audio.speakerPinInvert false
+cli -s .audio.speakerPinHoldMs 2000
+cli -s .audio.outputEnabled true
+cli -s .audio.outputVolume 80
 
 cli -s .motionDetect.enabled false
 cli -s .motionDetect.visualize false

@@ -1,0 +1,6 @@
+#c120-speaker { position: relative; }
+#c120-speaker label { cursor: default; letter-spacing: 0; }
+#c120-speaker output { min-width: 3ch; justify-content: flex-end; padding: 0 .6rem 0 0; letter-spacing: 0; font-variant-numeric: tabular-nums; cursor: default; }
+#c120-speaker[aria-busy="true"] { opacity: .65; }
+#c120-speaker-status { position: absolute; bottom: calc(100% + 8px); left: 0; white-space: nowrap; }
+#c120-secure-talk a { color: inherit; text-decoration: none; }

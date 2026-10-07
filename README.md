@@ -20,14 +20,20 @@ and on the [wiki][wiki].
 
 ## TP-Link Tapo C120 v1
 
+**Installing from stock without UART?** Start with the
+[guided SD-card installer](contrib/tapo-c120/stock-install/README.md).
+The tested SC438HAI / stock 1.4.4 kit is included; no firmware build is needed.
+
 This fork includes a C120-specific SSC377 lite profile:
 
 ```sh
 make BOARD=ssc377_lite_tp-link-tapo-c120-v1
 ```
 
-See `contrib/tapo-c120/` for the C120 recovery plugin, runtime helpers, and
-notes about the SC430AI IQ/config blob used by the working cameras.
+See the [C120 guide](contrib/tapo-c120/README.md) for base firmware, installable
+Wi-Fi recovery, Lights and two-way audio controls, and optional
+[AI Detection](contrib/tapo-c120/ai-plugin/README.md). Dated image hashes and
+hardware trials are kept in the [verification history](contrib/tapo-c120/HISTORY.md).
 
 ## Support
 

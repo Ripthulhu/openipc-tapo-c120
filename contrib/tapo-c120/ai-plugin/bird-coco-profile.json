@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "bird-coco-realcal",
+  "name": "Bird - YOLOv5n COCO (photo calibrated)",
+  "target": "ssc377-ipu-v6",
+  "decoder": "yolov5n-coco-bird-v1",
+  "modelBytes": 4456832,
+  "sha256": "9dc16e8480a099b5ab355491fea9f86ebd132e6b12d37e9d40e2b5d1283323ab",
+  "confidence": 0.25,
+  "nms": 0.45
+}

@@ -15,18 +15,6 @@ say() {
 	echo "[$PLUGIN_NAME] $*"
 }
 
-script_dir() {
-	case "$0" in
-		*/*)
-			dir=${0%/*}
-			;;
-		*)
-			dir=.
-			;;
-	esac
-	cd "$dir" && pwd
-}
-
 require_root() {
 	uid="$(id -u 2>/dev/null || echo 1)"
 	[ "$uid" = "0" ] || fail "run this installer as root"
@@ -53,19 +41,6 @@ install_file() {
 	mkdir -p "$(dirname "$dest")"
 	cp "$src" "$dest"
 	chmod "$mode" "$dest"
-}
-
-extract_tgz() {
-	archive="$1"
-	dest="$2"
-
-	if command -v gzip >/dev/null 2>&1; then
-		gzip -dc "$archive" | tar -xf - -C "$dest"
-	elif command -v zcat >/dev/null 2>&1; then
-		zcat "$archive" | tar -xf - -C "$dest"
-	else
-		fail "gzip or zcat is required to extract $archive"
-	fi
 }
 
 backup_wlan0() {
@@ -123,7 +98,7 @@ install_plugin() {
 	stop_watcher
 
 	say "installing hostapd/libnl overlay"
-	extract_tgz "$BASE/hostapd-overlay.tgz" /
+	gzip -dc "$BASE/hostapd-overlay.tgz" | tar -xf - -C /
 	chmod 0755 /usr/sbin/hostapd /usr/bin/hostapd_cli 2>/dev/null || true
 
 	install_file "$BASE/files/usr/bin/c120-setup-ap" /usr/bin/c120-setup-ap 0755
@@ -169,7 +144,7 @@ status_plugin() {
 	fi
 }
 
-BASE="$(script_dir)"
+BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 case "${1:-install}" in
 	install)

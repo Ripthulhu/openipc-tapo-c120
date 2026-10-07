@@ -1,9 +1,62 @@
-# TP-Link Tapo C120 v1 Notes
+# TP-Link Tapo C120 v1
 
 This fork carries the working OpenIPC bring-up pieces for the TP-Link Tapo C120
-v1 on SigmaStar SSC377 / Infinity6C with an SC430AI sensor.
+v1 on SigmaStar SSC377 / Infinity6C with SC430AI or SC438HAI sensors. This guide describes
+current source defaults and installation; dated image hashes and camera trials
+are preserved in [HISTORY.md](HISTORY.md), not presented as current build artifacts.
+
+For a new stock camera, use the [guided installer](stock-install/README.md).
+It includes the validated firmware, verifies the sensor/version, and preserves
+the camera's own full physical backup before asking for flash confirmation.
+Currently supported: SC438HAI, C120 v1.0, stock 1.4.4 Build 260106 Rel.62350n.
+
+## Layout
+
+| Path | Purpose |
+| --- | --- |
+| `br-ext-chip-sigmastar/board/tapo-c120/` | Base firmware defaults and speaker GPIO hook |
+| `ap-recovery-plugin/` | After-flash reset-button Wi-Fi recovery |
+| `runtime-overlay/`, `install-runtime.sh` | Lights, motion/AI floodlight, Live speaker controls |
+| `ai-plugin/` | Optional AI Detection service, API, notifications and recording |
+| `ai-probe/` | Standalone bring-up diagnostic; not installed on cameras |
+| `check.sh`, `test_*` | Host-only regression checks |
 
 ## Firmware Board
+
+The newer **SC438HAI** variant now has a source-built driver at
+`sigmastar/infinity6c/sensor_sc438hai_mipi.c`, compiled against OpenIPC's SDK
+headers. Use `BOARD=ssc377_lite_tp-link-tapo-c120-v1-sc438hai` for that sensor.
+The original SC430AI profile below is unchanged; do not interchange them.
+
+SC438HAI hardware verification on 2026-10-06: native 2688x1520 linear sensor
+mode, H.264 output at 2560x1440/30 fps, stock day IQ loaded, and automatic
+startup after a cold boot with at least five seconds of power-off. An
+independent RTSP decode read 900 frames at the configured resolution/rate.
+Sensor/ISP counters measured 29.98-30.00 fps with no CRC or hardware-drop
+errors; the ISP channel's 44 startup drops did not increase during the check.
+This is a bounded bring-up test, not long-term stability certification.
+
+The extracted stock `sc438hai_2lane.ko` is **not** shipped or loaded. Its
+sensor-handle layout overwrites OpenIPC's SPI pointer and causes a kernel
+fault at address `0x9`; matching kernel version strings did not prove ABI
+compatibility. The source driver replaces it, and the temporary vendor-startup
+quarantine has been removed. The SC438HAI-only `/etc/default/majestic` exports
+`SENSOR=sc438hai` because automatic identification does not yet recognize it.
+Keep that file: it selects the correct IQ profile without a preload hook.
+
+The stock IQ file produces a minor SDK-version warning, also seen with the
+working SC430AI tuning. Linear video works. An experimental stock-derived HDR
+driver port now registers long/short planes and passes host timing/gain tests
+and an ARM module build. It also passed a linear QHD30 regression on `.101`.
+HDR frames are NOT validated: the current Majestic binary explicitly selects
+linear plane mode; four-lane PCB routing and suitable HDR ISP tuning are still
+unverified. HDR integration/testing was stopped at the user's request and the
+camera retains its proven linear-only module. The older SC430AI stock driver
+also contains HDR paths; our deployed SC430AI source remains linear-only.
+The stock alternate night IQ profiles are not validated. Automatic day/night is
+configured, but a physical lens-cover transition test is still outstanding
+on this sensor. Before migrating another stock camera, independently identify
+its sensor and preserve its own complete physical flash backup and credentials.
 
 Build the C120 profile with:
 
@@ -21,20 +74,21 @@ The board profile sets:
 - native automatic day/night: 16x gain for night, 2x for day, 15/60-second delays
 - 2560x1440 H.264 at 30 fps, 10000 kbps CBR, GOP 2 seconds (60 frames)
 - maximum exposure 33 ms for stable frame delivery
+- 48 kHz mono Opus microphone at level 50; speaker enabled at level 80 on GPIO43
 - JPEG, video1, motion detect, records, and crond disabled by default
 
 These are first-boot defaults, scoped to the C120 board overlay. Installing or
 updating the recovery plugin does not alter video settings. Existing cameras
 retain their settings on upgrade, so also set the resolution/rate explicitly
 when migrating them to QHD. The sensor mode advertises 30 fps; the first-boot
-QHD target is now 30 fps following the native trial below. The exposure
+QHD target is now 30 fps following the [native trial](HISTORY.md#qhd-30-fps-trial-2026-10-04). The exposure
 cap can reduce low-light brightness; raising it may reduce the actual frame
 rate.
 
 The current upstream Majestic handles QHD natively through its Ring SCL-to-VENC
 binding. The old `c120-qhd` package and preload hook have been removed. On an
-existing camera, remove the old `/etc/default/majestic` and
-`/usr/lib/libc120-qhd.so` only when upgrading to the tested new streamer and
+existing camera, remove the old preload setting from `/etc/default/majestic` and
+remove `/usr/lib/libc120-qhd.so` only when upgrading to the tested new streamer and
 supporting libraries. Do not remove the hook while keeping the older streamer.
 
 At QHD, leave `motionDetect.visualize` disabled: full-resolution motion boxes
@@ -49,6 +103,84 @@ general/package/sigmastar-osdrv-infinity6c/files/sensor/configs/sc430ai.bin
 
 The C120 CI artifact check requires the sensor module and this blob to be
 present. Other Infinity6C sensor profiles retain their existing behavior.
+
+## Audio
+
+The speaker amplifier is active-high GPIO43. The C120-only `muxes.sh` exports
+it as an output, initially low, on every boot through the existing
+`S30customizer` hook. Majestic's SigmaStar GPIO writer needs the pin exported
+before playback; configuring `speakerPin` alone left `set_gpio(43, 0) error`
+in the log. A repeated hook run preserves an already active output. Native
+Majestic controls power afterward, with a two-second hold after playback;
+no resident helper or additional audio service is needed.
+
+First-boot defaults enable microphone and speaker with shared 48 kHz mono
+audio, Opus capture, microphone level 50 and speaker level 80. The older
+8 kHz / speaker-off defaults predated playback verification. Existing cameras
+retain saved settings on upgrade: install the C120 `muxes.sh` and use the
+native Audio settings to enable output. On SigmaStar, changing the speaker
+level needs **Apply** to rebuild the pipeline; this briefly interrupts the
+stream but does not change video settings.
+
+Authenticated `POST /play_audio` accepts raw signed 16-bit little-endian mono
+PCM or Ogg Opus. For PCM, declare the source rate, for example
+`Content-Type: application/octet-stream;rate=48000`. Do not send a WAV header
+as PCM. Playback streams through the native server rather than staging a
+large file in the camera's RAM. See the
+[upstream audio documentation](https://github.com/OpenIPC/wiki/blob/master/en/majestic-streamer.md#enabling-the-speaker)
+for clip playback and two-way protocols. Browser microphone access needs
+HTTPS or a local secure origin; enabling the amplifier does not remove that
+browser restriction on ordinary LAN HTTP.
+
+The runtime installer adds a speaker-volume slider to **Live**, using the
+native toolbar styling. This changes only `audio.outputVolume`; the existing
+listen slider still controls playback in the browser. Changes are saved on
+release and applied through the native Majestic reload endpoint. Zero mutes
+the speaker. Save/apply failures remain visible rather than silently showing
+an unapplied level.
+
+Two-way audio reuses upstream's **Talk** toggle on the **WebRTC** transport.
+It requests the browser microphone only when Talk is switched on and releases
+it when switched off or the player closes. No custom audio transport or extra
+camera daemon is added. On plain HTTP, the add-on's Talk link opens the secure
+Live address saved in `/etc/c120-live-audio.json`, for example:
+
+```json
+{"secureLiveUrl":"https://camera.example.com/cgi-bin/live.cgi"}
+```
+
+Without a proxy address or configured native HTTPS certificate, the HTTP Talk
+link is disabled. For a reverse proxy, preserve Host and authentication,
+enable WebSocket upgrades with HTTP/1.1, disable request/response buffering,
+and allow long-lived streams. Use a trusted TLS certificate and restrict the
+proxy to trusted local clients; local DNS alone is not an access restriction.
+The owner verified browser-to-speaker talkback on 2026-10-05. Echo cancellation
+is not provided by the camera, so avoid putting the browser's speaker and the
+camera microphone next to each other during a call.
+
+For microphone streaming, use `/audio.opus`. The tested Majestic build can
+crash on `/audio.pcm` even with AI stopped; this is independent of speaker
+PCM uploads to `/play_audio`. See the [AI plugin status](ai-plugin/README.md#status).
+
+## Remote Live Viewing
+
+The native Live page offers WebRTC and MSE. WebRTC signaling uses the reverse
+proxy, but media normally uses a direct ICE/UDP connection to the camera.
+A proxy that serves the page successfully does not prove that path is reachable
+from a VPN client. Check VPN routes and narrowly scoped firewall permissions;
+keep the cameras and proxy private rather than opening them to the internet.
+
+If WebRTC stays at connecting, select **MSE** in the Live controls. The preference
+is saved per browser and camera origin, not in the camera's firmware settings.
+MSE uses `/ws/video` through the same HTTPS proxy and does not lower resolution,
+frame rate or bitrate. Listening remains available; Talk requires WebRTC.
+Native MSE can first try a data channel before falling back to WebSocket.
+
+A controlled failed-negotiation test took about 33 seconds to reach automatic
+WebSocket fallback. Separate proxy tests played at 2560x1440 / 30 fps. These are
+browser-test observations, not proof that every remote client's ICE path works.
+The [WireGuard investigation](HISTORY.md#wireguard-live-investigation-2026-10-06)
+records what was checked without claiming a confirmed phone-side fix.
 
 ## Installable Extras
 
@@ -65,17 +197,23 @@ present. Other Infinity6C sensor profiles retain their existing behavior.
 - `c120-light-pins.cgi` for configuring multiple camera-light GPIO pins
 - `c120-eventd` merged reset-button, light-pin mirror, and motion floodlight daemon
 - `c120-lights.cgi`, using the current Web UI's controls and navigation
+- a Live-page speaker-volume control and secure Talk link, without replacing the native player
 
-Install the AP recovery plugin with its own `install.sh` first. Then install the
-light controls from this directory:
+Run `build-plugin.sh` with the target compiler to generate both packages in
+`build/` (see [Build And Test](#build-and-test)). Copy the two tarballs to the
+camera and install AP recovery first, then the light controls:
 
 ```sh
-sh contrib/tapo-c120/install-runtime.sh
+cd /tmp
+gzip -dc openipc-c120-ap-recovery-plugin.tgz | tar -xf -
+sh openipc-c120-ap-recovery-plugin/install.sh
+gzip -dc openipc-c120-runtime.tgz | tar -xf -
+sh openipc-c120-runtime/install-runtime.sh
 ```
 
 The light installer requires the current OpenIPC Web UI and an inactive setup
 AP. It preserves the light-pin configuration and backs up the navigation file.
-Open **Camera > C120 Lights** for the five lamp modes and multi-pin settings.
+Open **Camera > Lights** for the five lamp modes and multi-pin settings.
 Re-run this installer after a standalone upstream Web UI update to restore the
 menu entry. It does not replace upstream's live/preview page.
 
@@ -85,9 +223,27 @@ the incorrect universal `/ 255` label and 8-bit low-luminance band are removed.
 This is a display-only fix; camera exposure and day/night settings do not change.
 Re-running the installer is idempotent and backs up the old dashboard script.
 
-### Night Motion Floodlight
+### Floodlight URL
 
-**Camera > C120 Lights > Motion floodlight** provides a night-only enable switch
+`http://CAMERA/cgi-bin/c120-floodlight.cgi` toggles white GPIO14 independently
+of the IR lights and day/night state. It uses the same authentication as other
+Majestic URLs and is listed under **Night** on **Stream URLs**. Majestic owns
+`/night/*` internally, so this runtime extension uses a CGI endpoint instead.
+Append `?action=on`, `?action=off`, or `?action=status` for idempotent control or
+a read-only check; `?action=toggle` is the default. GET and form-encoded POST
+are supported, while HEAD and invalid actions never change the lamp.
+
+The response is JSON with `white`, `manual`, and `available` booleans. Manual
+on cancels any active motion timer and stays on until turned off or another
+lamp mode is selected. Manual off releases ownership so fresh night-time
+motion can trigger the timer again. Motion preferences are not changed. The
+helper serializes these commands with motion/manual lamp control and rejects
+a floodlight GPIO assigned to the IR mirror or reset button. No extra server,
+resident process or stream restart is needed.
+
+### Night Motion Or AI Floodlight
+
+**Camera > Lights > Motion floodlight** provides a night-only enable switch
 and a duration of 1-600 seconds. Motion delay is adjustable from 0-600 seconds,
 defaulting to 3: the ROI-filtered counter must grow in consecutive one-second
 polls for that long before the light turns on. A quiet poll resets the wait;
@@ -99,6 +255,14 @@ retuned by this plugin. It uses the existing motion regions: detections rejected
 by Majestic's ROI filter do not start or extend the floodlight timer. With no
 regions configured, the native detector watches the whole image. Camera quality
 settings are never changed.
+
+With the [AI Detection plugin](ai-plugin/README.md) installed, this section also
+offers **AI objects** as the trigger, with separate Person / Pet / Vehicle / Bird
+filters. Qualification and duration work the same way. AI presence must be
+fresh, pass confidence and motion regions, and survive the qualification delay;
+raw motion alone cannot trigger an AI-only light. The existing GPIO helper reads
+the AI signal without a second daemon. New installs still default to motion,
+with automatic lighting disabled.
 
 The existing native helper reads `night_enabled` and the ROI-filtered native
 motion counter once per second. A new detection while night mode is active
@@ -119,37 +283,71 @@ The small HTTP reader is bounded to 200 ms per loopback request; no shell pollin
 process, extra resident daemon, dynamic library, or firmware reflash is needed.
 Status is available from `c120-eventd motion-status` as JSON.
 
-On 2026-10-05 this plugin was installed on both live cameras, with the feature
-disabled on `.126` and enabled on `.196`. Both retain a three-second motion
-delay and 30-second duration. Before adding the qualification delay, the owner
-confirmed physical motion/light-on/timed-off tests on both; recorded GPIO12/13
-stayed high throughout, while only GPIO14 switched. The added delay and
-out-of-region rejection passed simulated native-metric/GPIO tests; these are
-not a second physical movement test. Both current region lists are empty and
-were preserved. Final UI checks showed the saved off/on preferences and 3/30
-values at desktop and 390-pixel mobile width without form overflow or console
-errors. Complete native settings, Majestic PIDs, and boot IDs remained unchanged.
-Both sensors reported 30 fps at their saved 2560x1440/6000 kbps settings.
-The existing single-thread helper used 80/88 KiB RSS in the final sample.
-
-`c120-eventd.c` builds the native helper shipped in both payloads. It replaces
+`c120-eventd.c` builds one native helper, inserted into both generated packages.
+The source tree stores neither binary copies nor duplicate init scripts. It replaces
 the shell polling loop, enforces a single running instance, validates settings,
 and only changes follower GPIO outputs when necessary. Debug logging is capped
 at approximately 64 KiB. AP startup failure restores station mode and services;
 concurrent AP transitions are locked, and repeated start/stop calls are harmless.
 
-## Build And Test The Plugin
+## AI Detection
 
-Use the OpenIPC Infinity6C musl toolchain on Linux:
+The optional [AI Detection plugin](ai-plugin/README.md) provides person / pet /
+vehicle recognition, experimental sound categories, webhook notifications,
+AI-triggered recording and a signal for the existing floodlight helper. It
+preserves native motion regions and video settings. Both detectors and actions
+are opt-in on a fresh installation.
+
+The WebUI also manages compiled models on a mounted SD card, with upload,
+selection, removal and reported fallback to Stock. An optional bird-only YOLOv5n
+profile has passed offline decoder checks; live camera validation is pending an
+SD card. Stock remains the default and does not expose a verified bird class.
+
+Model binaries and the compatible IPU library are private, owner-provided build
+inputs; they are not committed or downloaded by the plugin build. Build/install,
+provenance, authenticated API and Home Assistant notification examples are in
+the plugin guide. Stop AI before running the standalone probe: both use IPU and
+SCL resources that must not be shared concurrently.
+
+## Build And Test
+
+Build from a Linux checkout with real symbolic links and LF line endings. A
+Windows checkout copied verbatim to Linux can produce an unbootable image:
+`#!/bin/sh\r` cannot execute, and flattened links break helpers and DNS. The
+post-build startup check rejects these defects before packing the rootfs.
+Run its regression tests with:
+
+```sh
+python3 general/scripts/tests/test_rootfs_startup.py
+```
+
+Build the helper with the OpenIPC Infinity6C musl toolchain on Linux. For the
+host checks on Debian/Ubuntu, install the test dependencies first:
+
+```sh
+sudo apt-get install gcc make haserl nodejs python3-numpy pkg-config ffmpeg curl \
+    libcurl4-openssl-dev libjson-c-dev libogg-dev libopus-dev zlib1g-dev
+```
+
+From the repository root:
 
 ```sh
 CC=/path/to/sdk/bin/arm-openipc-linux-musleabihf-gcc sh contrib/tapo-c120/build-plugin.sh
-python3 contrib/tapo-c120/test_runtime.py
-python3 contrib/tapo-c120/test_qhd.py
+sh contrib/tapo-c120/check.sh
 ```
 
 The helper is statically linked so both existing C120 firmware versions can run
-the same binary. The build updates both payload copies and `eventd.sha256`.
+the same binary. The build writes `build/c120-eventd`,
+`build/openipc-c120-ap-recovery-plugin.tgz`, and `build/openipc-c120-runtime.tgz`.
+Each package contains its own `eventd.sha256`; source files are never overwritten.
+Pass an output directory as the build script's first argument to build elsewhere.
+`check.sh` is also the C120 CI entry point. It checks generated packages and
+helper consistency, native helper/QHD behavior, Live audio controls, AI validation,
+notification and recording actions, synthetic Opus under ASan/UBSan, and the DSP
+reference. DSP sources are fetched from pinned upstream commits; stock models,
+camera credentials and private samples are not needed. Live `ai-plugin/test_api.py`
+is deliberately separate because it connects to a real camera.
+
 Tests use simulated GPIOs and services; they never touch a camera. They cover
 button toggling, exclusive IR modes, reload/stop, duplicate processes, AP
 rollback, board selection, and sensor-source placement. Motion tests cover
@@ -158,225 +356,3 @@ expiry/retrigger, scene-change settling, manual ownership,
 unavailable/invalid/stalled native metrics, counter resets, stale-marker cleanup,
 and POST validation. Real GPIO, native motion events, and the Web UI still need
 on-camera checks after deployment; simulated tests are not hardware evidence.
-
-On the two cameras checked on 2026-10-04, helper RSS fell from 928/964 KiB to
-60-64 KiB, and proportional memory from 198/229 KiB to 56-60 KiB. Shared BusyBox pages
-mean the RSS difference is not equivalent to total RAM reclaimed. Short samples
-showed about 4.8% of one CPU core for the old shell plus its children versus
-about 0.1% for the native helper. Resolution, requested FPS, bitrate, JPEG and
-motion settings were preserved.
-
-## QHD And Upstream Update, 2026-10-04
-
-The complete OpenIPC firmware tree was merged through upstream
-`a71fc5dd55b032eced1d882549b29c48fbd781c2`, rather than selectively backported.
-The latest rolling Majestic and Web UI were fetched on 2026-10-04. Supporting
-packages include Mbed TLS 3.6.4, curl 8.15.0, and OpenIPC libevent at
-`694decef35717d8955aa34ba4d2baaaf61c9e4a9`.
-
-In the initial software-only stage, both cameras received the new Majestic,
-Web UI, libraries, CLI, updater,
-clock helpers, and compatible C120 light plugin. The old QHD hook is no longer
-installed or loaded. Wi-Fi credentials, root passwords, bitrates, kernel,
-bootloader, partition layout, and media-heap settings were preserved. Existing
-JPEG/motion settings were retained; full-resolution motion visualization remains
-off. GOP is now 2 seconds, not 40 seconds.
-
-Backups of replaced software and configuration are stored privately on the
-deployment PC, including a verified pre-update archive for each camera. Do not
-commit these archives: they contain private configuration. Streamed staging on
-persistent storage avoids decompressing large archives into these cameras'
-small RAM-backed `/tmp`.
-
-| Camera suffix | Resolution | Frames in 60 s | Preserved bitrate |
-| --- | --- | --- | --- |
-| .126 | 2560x1440 | 1199 | 10000 kbps |
-| .196 | 2560x1440 | 1199 | 6000 kbps |
-
-Both passed a normal Majestic restart and a software-triggered AP/setup-page/
-station cycle. Opus audio remained working. The new light page was checked in
-a browser at desktop and 390-pixel mobile widths without horizontal overflow.
-Both also passed a software reboot: subsequent 15-second checks counted 299
-and 298 QHD frames respectively, with working audio, the new binary, no old
-hook, and the native recovery helper running. The clock restored correctly.
-The H.264 header still advertises 30 fps; counted frames over stream timestamps
-confirm the actual rate is approximately 20 fps. Physical button testing and a
-multi-hour stream soak remain separate checks.
-
-## Verified Full Image
-
-The complete latest firmware built successfully from `84d98762`. C120-specific
-256 KiB SquashFS blocks and XZ ARM/ARM-Thumb compression let it fit the existing
-partitions without removing the Web UI or changing image quality:
-
-| Image | Bytes | Partition limit |
-| --- | --- | --- |
-| `uImage.ssc377` | 2039272 | 2097152 |
-| `rootfs.squashfs.ssc377` | 5140480 | 5242880 |
-
-The image identifies itself as `ssc377_lite_tp-link-tapo-c120-v1`, not generic
-SSC377 lite. Do not substitute a generic SSC377 image: it lacks the C120 sensor,
-Wi-Fi power, and GPIO defaults. Recovery/light controls remain installable extras,
-not files baked into the base image.
-
-SHA256:
-
-```text
-711cfac32f177f6c7afac8c12f457be628b473539a2c79becb14f1b27d51382b  uImage.ssc377
-18cf14b012bf72c7dd17a9e1ee7a750fa144d8623b2fb8ebd7a115bfaacfc318  rootfs.squashfs.ssc377
-fb6b203fde1fee82a2e13020abc82324680f568f972bb2ef0fe087ed0b8abf59  openipc.ssc377-nor-lite.tgz
-663debf35b66ccf5d3e8c5a36d2b9d00c1cafce9d07c1dbb02216cb01bf71447  usr/bin/majestic
-```
-
-The owner subsequently authorized a full flash over Wi-Fi, with UART recovery
-available if necessary. Both cameras were upgraded successfully on 2026-10-04;
-no UART recovery was needed. They now boot the October 4 kernel 5.10.61 #10
-and root filesystem `84d98762`, displaying firmware version `2.6.10.04`.
-Fresh installation still retains the upstream password-claim and Majestic
-EULA flow for the human owner; existing claimed credentials were preserved.
-
-Full flash backups and a logical overlay archive were stored privately off
-each camera before writing. With no SD device exposed, Majestic was stopped
-and the two raw image files were staged separately in `/tmp`, not an archive
-plus unpacked copies. About 6.5 MiB remained available before the RAM pivot.
-Upstream sysupgrade v1.0.69 was used with run-specific guards to abort if that
-pivot failed and leave U-Boot environment keys untouched. Bootloader and
-environment partition hashes remained identical, and independent SHA256
-readbacks of both written images matched the published hashes above.
-
-Retained overlay software was compared with ROM. The historical first-camera
-sensor/load-script override, firmware version stamp, and comment-only helper
-copies were reconciled with the new image. The separately installed AP/light
-plugin, Wi-Fi configuration, passwords, SSH identity, video settings and
-disabled crond were retained. No partition or media-heap change was needed.
-
-Each camera passed AP/setup-page/station restoration and an additional reboot.
-Final 60-second checks counted 1198 QHD H.264 frames on each, with 3001/3000
-Opus frames respectively. Bitrates stayed at 10000/6000 kbps; JPEG and motion
-remain off on the first camera and on on the second. Both helpers remained
-running, and available memory was approximately 9908/9568 KiB. Physical button
-presses and a multi-hour stream soak remain unverified in this rollout.
-
-Never substitute a generic SSC377 image or use validation-bypass flags for
-these upgrades. Preserve the settings partition unless deliberately doing a
-fresh installation, which returns the camera to the human claim/EULA flow.
-
-## Automatic Day/Night And Settings Audit
-
-The post-flash audit on 2026-10-04 found `lightMonitor` disabled on the first
-camera and enabled on the second. The default exposure-exhaustion trigger did
-not switch the first camera even with its lens covered: SigmaStar reported
-128x analog gain and zero scene luminance, but `isp_exposureismax` remained 0.
-The C120 profile therefore uses Majestic's native `autoNightGain: 16` override,
-not an extra polling daemon or legacy raw-gain thresholds. The observed
-uncovered daytime gains were below 10x. This is a tested starting point, not
-a claim that every installation has identical lighting.
-
-The source profile now enables the monitor, keeps both actuators in `auto`,
-and explicitly sets gain thresholds of 16x/2x and night/day delays of 15/60
-seconds. It retains the inverted single-pin IR-cut on GPIO81 and active-high
-lamp leader GPIO12. With the separately installed light plugin configured for
-`12 13`, both IR illuminators follow the automatic night state. No daylight
-sensor pin or legacy `minThreshold`/`maxThreshold` is configured.
-
-Both live cameras passed owner-assisted lens-cover/uncover tests. Metrics
-recorded one automatic night and one automatic day transition on each, source
-4, grayscale in night, GPIO81 changing 1 -> 0 -> 1, and GPIO12/GPIO13 changing
-0 -> 1 -> 0. Majestic's lamp-down check confirmed day; its anti-flapping penalty
-remained 1. These short tests do not replace a dawn/dusk or overnight soak.
-
-Live changes were limited to `nightMode.lightMonitor` and `autoNightGain`.
-Effective configuration comparisons confirmed that all other Majestic settings
-were preserved, including image orientation, audio rates, JPEG size, motion
-ROIs, resolution, requested frame rate and bitrate. Both Majestic processes
-remained running without rebuilding their media pipelines. Subsequent
-30-second RTSP checks counted 598/599 QHD H.264 frames and 1501/1500 Opus frames
-on the first/second cameras. Sensor selection, Wi-Fi power/driver, reset-button
-plugin, memory layout, and watchdog were already configured correctly.
-
-The first camera's clock was about 84 seconds fast with public NTP pools. It
-was switched to a verified local time server and then agreed with the PC to
-within the one-second clock-read precision; the second camera's working NTP
-settings and both timezones were preserved. The local server address is a
-deployment setting, not a firmware default. The known SDK/IQ minor-version
-warning remains; this audit did not substitute an untested sensor tuning blob.
-
-The verified image from `84d98762` above predates this source-default change;
-its hashes have not changed. Existing installations preserve their overlay and
-do not rerun the first-boot customizer. On the tested October Majestic, enable
-the same native policy without reflashing:
-
-```sh
-cli -s .nightMode.lightMonitor true
-cli -s .nightMode.autoNightGain 16
-```
-
-Leave the sensor-pin and legacy threshold fields empty, keep the IR-cut and
-camera light in automatic mode, and retain the 2x/15s/60s defaults. The current
-Web UI exposes these controls under **Settings > Day / Night**. See
-[upstream day/night documentation](https://github.com/OpenIPC/wiki/blob/master/en/majestic-streamer.md#auto-daynight-detection)
-for the native policy and supported tuning keys.
-
-A separate full image was rebuilt from `251e59a5` with these new first-boot
-defaults. Kernel/rootfs sizes are 2039332/5140480 bytes, still within the same
-partitions. Packed-image checks confirmed the policy and unchanged Majestic
-binary. This newer package has not been flashed or boot-tested; the two live
-cameras remain on the verified `84d98762` base with the tested settings saved
-persistently. An additional flash was not needed for this configuration change.
-
-The full ARM build, native helper/form tests, QHD defaults/startup/pruning tests,
-CI selector self-test, workflow syntax checks, and upstream shell tests passed.
-
-## QHD 30 FPS Trial, 2026-10-04
-
-Both cameras now retain an FPS-only change to 30 at 2560x1440 on the tested
-October Majestic. Their existing 10000/6000 kbps bitrates, 33 ms exposure cap,
-two-second GOP, audio, orientation, JPEG/motion settings and automatic day/night
-policy were preserved by complete effective-configuration comparisons. The
-separately installed AP/light helper remains running; both IR lamp pins still
-follow the automatic night state. No firmware flash, preload, sensor override,
-media-heap change or feature removal was needed.
-
-Changing `video0.fps` through the live API alone accepted 30 but still encoded
-about 20 fps on the first camera. A normal Majestic restart recreated the
-native Ring SCL-to-VENC binding at 30/1 -> 30/1 instead of 30/1 -> 20/1. For
-this tested build, restart after changing the saved frame rate:
-
-```sh
-cli -s .video0.fps 30
-/etc/init.d/S95majestic restart
-```
-
-Each camera passed a 15-second RTSP check followed by three 60-second checks,
-with working Opus audio, stable streamer PID and unchanged boot ID:
-
-| Camera suffix | Decoded frames per 60 s probe | Native encoded fps | Available RAM at end |
-| --- | --- | --- | --- |
-| .126 | 1771 / 1799 / 1786 | 29.960 / 29.981 / 29.967 | 10000 KiB |
-| .196 | 1799 / 1799 / 1799 | 29.992 / 29.993 / 29.994 | 9300 KiB |
-
-Native counter deltas are measured independently of the nominal H.264 header,
-which already advertised 30 even at the previous 20 fps setting. CPU usage
-during the longer probes was approximately 30-33% / 26-32%, and temperatures
-were 70/72 C. These are short night-mode trials, not an overnight stability or
-latency soak. Following the owner's approval, source first-boot defaults now
-use 30 fps and both cameras retain it persistently. The owner power-cycled both
-after the trial; these were intentional, not observed crashes. Subsequent
-15-second checks counted 449 QHD frames on each, with working audio and saved
-30 fps. To fall back to 20 fps, change `video0.fps` and perform the same normal streamer
-restart. Previously packed images retain their historical defaults; rebuild
-the C120 profile to include this source change. Existing camera overlays keep
-their saved video settings on upgrade.
-
-A separate package was rebuilt from `251e59a5` plus the FPS-default change.
-Kernel/rootfs sizes are 2039300/5140480 bytes, within the existing partitions.
-Packed-image inspection confirmed the 30 fps customizer, and the QHD defaults,
-pruning and streamer lifecycle tests passed. This new package has not been
-flashed or boot-tested; live cameras keep their verified base image and saved
-30 fps configuration.
-
-```text
-0719396c7af5386037d2551825de21f942cfc3980888b8c7c7fd57cf38be1648  uImage.ssc377
-9663b8f81db8b5086afc603d8a8bef9a281a8d55c18b4cd0175c61dd0f0b0fcb  rootfs.squashfs.ssc377
-740ca10fb746bfe83d034831e239fbdbc2a8e96f9fd849d9d74008b6e184a8a1  openipc.ssc377-nor-lite.tgz
-```

@@ -26,7 +26,11 @@ def test_defaults(root):
                     ".nightMode.autoDayDelay 60", ".nightMode.irCut auto",
                     ".nightMode.backlight auto", ".nightMode.backlightInvert false",
                     ".nightMode.irCutPin1 81", ".nightMode.irCutSingleInvert true",
-                    ".nightMode.backlightPin 12"):
+                    ".nightMode.backlightPin 12", ".audio.enabled true",
+                    ".audio.codec opus", ".audio.srate 48000", ".audio.volume 50",
+                    ".audio.speakerPin 43", ".audio.speakerPinInvert false",
+                    ".audio.speakerPinHoldMs 2000", ".audio.outputEnabled true",
+                    ".audio.outputVolume 80"):
         assert "-s " + setting in result.stdout
     for key in ("lightSensorPin", "minThreshold", "maxThreshold", "irCutPin2"):
         assert ".nightMode." + key not in result.stdout, "native automatic switching must not use legacy inputs"
@@ -43,6 +47,10 @@ def test_pruning(root):
         target = root / scenario
         for directory in ("lib", "usr/lib", "bin", "sbin", "usr/bin", "usr/sbin"):
             (target / directory).mkdir(parents=True)
+        # Pruning uses the normal startup validator; these binaries are not executed.
+        for name in ("init", "bin/sh", "sbin/init", "linuxrc", "usr/sbin/cli"):
+            write(target / name, "\x7fELF fixture\n")
+            (target / name).chmod(0o755)
         config = target / ".config"
         write(config, "BR2_TOOLCHAIN_USES_" + ("GLIBC" if scenario == "glibc" else "MUSL") + "=y\n")
         for lib in ("libgcc_s", "libatomic"):
@@ -64,6 +72,33 @@ def test_pruning(root):
         assert (module / "modules.builtin.modinfo").exists() == (scenario == "kmod")
         assert (module / "modules.dep").exists() and (module / "modules.alias").exists()
     print("PASS pruning: unused/used musl libraries, glibc retention, BusyBox/kmod indexes")
+
+
+def test_speaker_gpio(root):
+    root.mkdir(parents=True)
+    gpio = root / "gpio43"
+    script = (REPO / "br-ext-chip-sigmastar/board/tapo-c120/overlay/usr/share/openipc/muxes.sh").read_text()
+    script = script.replace("/sys/class/gpio", str(root))
+    assert "sh /usr/share/openipc/muxes.sh" in (REPO / "general/overlay/etc/init.d/S30customizer").read_text()
+    mocks = '''echo() {
+        if [ "$1" = 43 ]; then
+            mkdir -p "$PIN"
+            printf 'in\\n' > "$PIN/direction"
+        fi
+        printf '%s\\n' "$1"
+    }
+'''
+    subprocess.run(["sh", "-s"], input=mocks + script, text=True, check=True)
+    assert (root / "export").read_text() == "43\n"
+    assert (gpio / "direction").read_text() == "low\n", "new amplifier must start off"
+    write(gpio / "direction", "out\n")
+    write(gpio / "value", "1\n")
+    write(root / "export", "already exported\n")
+    subprocess.run(["sh", "-s"], input=mocks + script, text=True, check=True)
+    assert (gpio / "direction").read_text() == "out\n"
+    assert (gpio / "value").read_text() == "1\n", "do not interrupt active playback on a repeated run"
+    assert (root / "export").read_text() == "already exported\n"
+    print("PASS C120 speaker GPIO: boot hook, low initialization, repeat preserves playback")
 
 
 def test_init(root):
@@ -117,5 +152,6 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="c120-qhd-test-") as tmp:
         root = Path(tmp)
         test_defaults(root / "defaults")
+        test_speaker_gpio(root / "speaker-gpio")
         test_pruning(root / "pruning")
         test_init(root / "init")

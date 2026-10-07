@@ -106,6 +106,7 @@ enter_ap_maintenance() {
 	# Preserve the restoration list if an interrupted transition is retried.
 	touch "$SERVICE_STATE"
 	log_memory "before maintenance"
+	stop_service_if_running S97c120-ai c120-aid /run/c120-ai.pid
 	stop_service_if_running S95majestic majestic
 	stop_service_if_running S49ntpd ntpd
 	stop_service_if_running S60crond crond

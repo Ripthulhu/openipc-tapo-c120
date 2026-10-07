@@ -220,3 +220,5 @@ if [ -f "${STRIPPER}" ]; then
 	fi
 	rm -f "${STRIP_TMP}" "${STRIP_ERR}"
 fi
+
+python3 "${BR2_EXTERNAL_GENERAL_PATH}/scripts/check-rootfs-startup.py" "${TARGET_DIR}" || exit 1

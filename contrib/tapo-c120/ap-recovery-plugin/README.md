@@ -32,13 +32,16 @@ locked, and repeated start/stop requests do not discard recovery state.
 
 ## Install
 
-Copy the packaged tarball to the camera, extract it, and run the installer:
+Run `../build-plugin.sh` with the target compiler first. It produces
+`../build/openipc-c120-ap-recovery-plugin.tgz` from these sources and the shared
+helper/init script. Copy that packaged tarball to the camera, extract it, and
+run the installer:
 
 ```sh
-scp openipc-c120-ap-recovery-plugin-20261004.tgz root@<CAMERA_IP>:/tmp/
+scp contrib/tapo-c120/build/openipc-c120-ap-recovery-plugin.tgz root@<CAMERA_IP>:/tmp/
 ssh root@<CAMERA_IP>
 cd /tmp
-gzip -dc openipc-c120-ap-recovery-plugin-20261004.tgz | tar -xf -
+gzip -dc openipc-c120-ap-recovery-plugin.tgz | tar -xf -
 cd openipc-c120-ap-recovery-plugin
 sh ./install.sh
 ```
@@ -52,7 +55,8 @@ It does not change Majestic settings.
 
 The bundled helper is built from `../c120-eventd.c` using
 `../build-plugin.sh`; it is an ARM hard-float, statically linked musl binary.
-Its checksum is recorded in `eventd.sha256`.
+Its checksum is generated in the package's `eventd.sha256`, not stored alongside
+the source files.
 
 Check the install state:
 

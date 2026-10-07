@@ -1,0 +1,20 @@
+#!/bin/sh
+case "$1" in
+    start)
+        [ ! -e /run/c120-setup-ap.active ] || exit 0
+        export LD_LIBRARY_PATH=/usr/lib/c120-ai
+        start-stop-daemon -S -q -b -x /usr/lib/c120-ai/c120-aid >/dev/null 2>&1
+        ;;
+    stop)
+        start-stop-daemon -K -q -x /usr/lib/c120-ai/c120-aid || true
+        i=0
+        while pidof c120-aid >/dev/null && [ "$i" -lt 10 ]; do
+            sleep 1
+            i=$((i+1))
+        done
+        ! pidof c120-aid >/dev/null
+        ;;
+    restart) "$0" stop && "$0" start ;;
+    reload) start-stop-daemon -K -q -s HUP -x /usr/lib/c120-ai/c120-aid ;;
+    *) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 2 ;;
+esac

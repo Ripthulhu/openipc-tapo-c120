@@ -50,6 +50,14 @@ if grep -q '^BR2_OPENIPC_SNS_MODEL="sc430ai"' "$CONFIG"; then
 	fi
 fi
 
+if grep -q '^BR2_OPENIPC_SNS_MODEL="sc438hai"' "$CONFIG"; then
+	check_module BR2_PACKAGE_SIGMASTAR_OSDRV_SENSORS sigmastar/sensor_sc438hai_mipi.ko
+	if [ ! -s "$TARGET_DIR/etc/sensors/sc438hai.bin" ]; then
+		echo "MISSING: SC438HAI IQ/config blob" >&2
+		fail=1
+	fi
+fi
+
 if [ "$fail" -ne 0 ]; then
 	echo "check_target_modules: regression detected" >&2
 	exit 1

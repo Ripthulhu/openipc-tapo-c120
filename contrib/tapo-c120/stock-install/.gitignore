@@ -1,0 +1,8 @@
+# These contain passwords, full factory backups and temporary private keys.
+/private-runs/
+/.venv*/
+*.key
+*.pem
+openipc-raw.bin
+raw-stock*.bin
+!/kit/libc.so

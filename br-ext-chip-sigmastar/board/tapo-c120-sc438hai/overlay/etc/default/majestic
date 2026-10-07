@@ -1,0 +1,2 @@
+# Autodetection does not recognize SC438HAI yet.
+export SENSOR=sc438hai
