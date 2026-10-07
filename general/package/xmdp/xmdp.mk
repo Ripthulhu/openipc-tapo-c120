@@ -5,16 +5,14 @@
 ################################################################################
 
 XMDP_LICENSE = Public Domain
+XMDP_DEPENDENCIES = cjson
 
 define XMDP_EXTRACT_CMDS
 	cp -avr $(XMDP_PKGDIR)/src/* $(@D)/
 endef
 
-XMDP_MAKE_OPTS = \
-	CC="$(TARGET_CC)"
-
 define XMDP_BUILD_CMDS
-	$(MAKE) $(XMDP_MAKE_OPTS) -C $(@D)
+	$(TARGET_MAKE_ENV) $(MAKE) $(TARGET_CONFIGURE_OPTS) -C $(@D)
 endef
 
 define XMDP_INSTALL_TARGET_CMDS

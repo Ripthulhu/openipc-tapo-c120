@@ -12,7 +12,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "cjson/cJSON.h"
+#include <cjson/cJSON.h>
 #include "netip.h"
 #include "utils.h"
 
