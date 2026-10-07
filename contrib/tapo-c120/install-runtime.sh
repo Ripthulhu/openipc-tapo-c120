@@ -4,8 +4,15 @@ set -eu
 [ "$(id -u)" = 0 ] || { echo "Run as root" >&2; exit 1; }
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 HEADER=/var/www/cgi-bin/p/header.cgi
+DASHBOARD=/var/www/cgi-bin/dashboard.cgi
 [ -f "$HEADER" ] || { echo "Install the current OpenIPC Web UI first" >&2; exit 1; }
+[ -f "$DASHBOARD" ] || { echo "Install the current OpenIPC dashboard first" >&2; exit 1; }
 grep -q 'href="stream-urls.cgi"' "$HEADER" || { echo "Unsupported Web UI navigation" >&2; exit 1; }
+if ! grep -q 'id="c120-memory-map"' "$DASHBOARD"; then
+	grep -q '<div class="mj-cap">Memory</div>' "$DASHBOARD" || { echo "Unsupported memory tile" >&2; exit 1; }
+	grep -q 'Memory &mdash; what is holding it' "$DASHBOARD" || { echo "Unsupported memory chart" >&2; exit 1; }
+	grep -q 'id="st-mem-note"></div>' "$DASHBOARD" || { echo "Unsupported memory chart note" >&2; exit 1; }
+fi
 [ ! -f /run/c120-setup-ap.active ] || { echo "Stop the setup AP first" >&2; exit 1; }
 [ -x /etc/init.d/S45c120-ap-button ] || { echo "Install the AP recovery plugin first" >&2; exit 1; }
 (cd "$BASE" && sha256sum -c eventd.sha256)
@@ -21,6 +28,15 @@ if [ -f /var/www/a/dashboard.js ]; then
 	sed -f "$BASE/dashboard-luminance.sed" /var/www/a/dashboard.js > /var/www/a/dashboard.js.new
 	chmod 644 /var/www/a/dashboard.js.new
 	mv /var/www/a/dashboard.js.new /var/www/a/dashboard.js
+fi
+if ! grep -q 'id="c120-memory-map"' "$DASHBOARD"; then
+	cp -p "$DASHBOARD" "$BACKUP/dashboard.cgi"
+	sed -e 's|<div class="mj-cap">Memory</div>|<div class="mj-cap">Linux memory</div>|' \
+		-e 's|<span class="mj-cap">Memory &mdash; what is holding it</span>|<span class="mj-cap">Linux memory over time</span>|' \
+		"$DASHBOARD" | sed "/id=\"st-mem-note\"><\\/div>/r $BASE/dashboard-memory.html" > "$DASHBOARD.new"
+	grep -q 'id="c120-memory-map"' "$DASHBOARD.new" || { rm -f "$DASHBOARD.new"; echo "Memory panel patch failed" >&2; exit 1; }
+	chmod 755 "$DASHBOARD.new"
+	mv "$DASHBOARD.new" "$DASHBOARD"
 fi
 URLS=/var/www/cgi-bin/stream-urls.cgi
 if [ -f "$URLS" ] && ! grep -q 'c120-floodlight.cgi' "$URLS"; then

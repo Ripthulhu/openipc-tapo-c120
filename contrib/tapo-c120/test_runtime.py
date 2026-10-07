@@ -58,8 +58,10 @@ def test_payloads():
                     if prefix == 'files':
                         assert archive.extractfile(f'{name}/hostapd-overlay.tgz').read() == (ap / 'hostapd-overlay.tgz').read_bytes()
                     else:
-                        for asset in ('dashboard-luminance.sed', 'floodlight-url.html', 'live-audio.html'):
+                        for asset in ('dashboard-luminance.sed', 'dashboard-memory.html', 'floodlight-url.html', 'live-audio.html'):
                             assert archive.extractfile(f'{name}/{asset}').read() == (BASE / asset).read_bytes()
+                        for asset in ('var/www/a/c120-memory.js', 'var/www/cgi-bin/c120-memory.cgi'):
+                            assert archive.extractfile(f'{name}/{prefix}/{asset}').read() == (runtime / asset).read_bytes()
             assert not list(out.glob('.packages.*')), 'packaging left temporary files'
         assert not (ap / 'files/usr/bin/c120-eventd').exists()
         assert not (runtime / 'usr/bin/c120-eventd').exists()
@@ -658,6 +660,59 @@ def test_dashboard(root):
     print("PASS dashboard: raw SDK luminance, automatic range, no 8-bit band, idempotent fixup")
 
 
+def test_memory(root):
+    root.mkdir(parents=True)
+    haserl = shutil.which(os.environ.get("HASERL", "haserl"))
+    assert haserl, "Haserl is required to test the memory endpoint"
+    cmdline = root / "cmdline"
+    heap = root / "mma_heap_name0"
+    source = (BASE / "runtime-overlay/var/www/cgi-bin/c120-memory.cgi").read_text()
+    source = source.replace("/proc/cmdline", str(cmdline)).replace(
+        "/proc/mi_modules/mi_sys_mma/mma_heap_name0", str(heap))
+    page = root / "memory.cgi"
+    write(page, source)
+    cmdline.write_text("console=ttyS0 LX_MEM=0x4000000 mma_heap=mma_heap_name0,miu=0,sz=0x2000000 cma=2M\n")
+    heap.write_text("heap pa_start length avail\n      mma_heap_name0 22000000 2000000 600000\n")
+
+    def read(method="GET"):
+        result = subprocess.run([haserl, str(page)],
+                                env=dict(os.environ, REQUEST_METHOD=method, QUERY_STRING=""),
+                                capture_output=True, text=True, check=True)
+        assert not result.stderr, result.stderr
+        return result.stdout
+
+    response = read()
+    assert "200 OK" in response
+    assert json.loads(response.split("\n\n", 1)[1]) == {
+        "physicalBytes": 64 * 1048576,
+        "mediaBytes": 32 * 1048576,
+        "mediaFreeBytes": 6 * 1048576,
+    }
+    heap.unlink()
+    assert "mediaFreeBytes" not in read()
+    cmdline.write_text("LX_MEM=0x4000000 mma_heap=mma_heap_name0,miu=0,sz=oops\n")
+    assert "503 Service Unavailable" in read()
+    assert "405 Method Not Allowed" in read("POST")
+
+    page = root / "dashboard.cgi"
+    write(page, '<div class="mj-cap">Memory</div>\n'
+          '<span class="mj-cap">Memory &mdash; what is holding it</span>\n'
+          '<div class="x-small text-secondary" id="st-mem-note"></div>\n')
+    snippet = BASE / "dashboard-memory.html"
+    renamed = subprocess.run(['sed', '-e',
+        's|<div class="mj-cap">Memory</div>|<div class="mj-cap">Linux memory</div>|',
+        '-e', 's|<span class="mj-cap">Memory &mdash; what is holding it</span>|'
+        '<span class="mj-cap">Linux memory over time</span>|', str(page)],
+        capture_output=True, text=True, check=True).stdout
+    first = subprocess.run(['sed', f'/id="st-mem-note"><\\/div>/r {snippet}'],
+                           input=renamed, capture_output=True, text=True, check=True).stdout
+    assert first.count('id="c120-memory-map"') == 1
+    assert "Linux memory over time" in first and "Linux memory</div>" in first
+    assert first.index('id="st-mem-note"') < first.index('id="c120-memory-map"')
+    assert "id=\"c120-memory-map\"" in snippet.read_text()
+    print("PASS memory: boot map, live MMA free, unavailable fallback, GET-only, dashboard insertion")
+
+
 def test_endpoint_list(root):
     root.mkdir(parents=True)
     page = root / "stream-urls.cgi"
@@ -741,5 +796,6 @@ if __name__ == "__main__":
         test_ap(root / "ap")
         test_forms(root / "forms")
         test_dashboard(root / "dashboard")
+        test_memory(root / "memory")
         test_endpoint_list(root / "endpoints")
         test_build(root / "build")
