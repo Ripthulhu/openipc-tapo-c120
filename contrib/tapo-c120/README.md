@@ -8,7 +8,11 @@ are preserved in [HISTORY.md](HISTORY.md), not presented as current build artifa
 For a new stock camera, use the [guided installer](stock-install/README.md).
 It includes the validated firmware, verifies the sensor/version, and preserves
 the camera's own full physical backup before asking for flash confirmation.
-Currently supported: SC438HAI, C120 v1.0, stock 1.4.4 Build 260106 Rel.62350n.
+SC438HAI / stock 1.4.4 has completed a UART-free migration. The older
+SC430AI / stock 1.4.1 path is available with explicit experimental opt-in,
+qualified against saved dumps but not yet through a complete live migration.
+Both use the same Python installer on Windows, Linux and macOS; no WSL is
+needed for normal installation. See the guide for exact supported builds.
 
 ## Layout
 

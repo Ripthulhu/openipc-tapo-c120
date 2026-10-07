@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHON=${PYTHON:-python3}
+"$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || {
+    echo "Python 3.11+ with venv and pip is required. No root or distro-specific tools are needed." >&2
+    exit 1
+}
+VENV="$HERE/.venv-c120-install-posix"
+if [ ! -x "$VENV/bin/python" ]; then
+    "$PYTHON" -m venv "$VENV"
+fi
+"$VENV/bin/python" -m pip install --disable-pip-version-check -q -r "$HERE/requirements.txt"
+exec "$VENV/bin/python" "$HERE/c120_install.py" "$@"

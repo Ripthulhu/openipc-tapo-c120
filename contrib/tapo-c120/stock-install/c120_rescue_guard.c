@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/watchdog.h>
@@ -49,7 +50,24 @@ int main(int argc, char **argv) {
         }
         int ownerfd = syscall(SYS_pidfd_open, (pid_t)owner, 0);
         if (ownerfd < 0) { perror("pidfd_open"); return 1; }
-        int watchdog = syscall(SYS_pidfd_getfd, ownerfd, 6, 0);
+        /* Descriptor numbers can differ between stock releases and boots. */
+        struct stat device, candidate;
+        if (stat("/dev/watchdog", &device)) { perror("watchdog device"); close(ownerfd); return 1; }
+        snprintf(path, sizeof(path), "/proc/%ld/fd", owner);
+        DIR *fds = opendir(path);
+        if (!fds) { perror("monitor descriptors"); close(ownerfd); return 1; }
+        int watchdog = -1;
+        struct dirent *entry;
+        while ((entry = readdir(fds))) {
+            long number = strtol(entry->d_name, &end, 10);
+            if (end == entry->d_name || *end || number < 0 || number > INT_MAX) continue;
+            snprintf(path, sizeof(path), "/proc/%ld/fd/%ld", owner, number);
+            if (stat(path, &candidate) || !S_ISCHR(candidate.st_mode) ||
+                candidate.st_rdev != device.st_rdev) continue;
+            watchdog = syscall(SYS_pidfd_getfd, ownerfd, (int)number, 0);
+            break;
+        }
+        closedir(fds);
         close(ownerfd);
         if (watchdog < 0) { perror("pidfd_getfd watchdog"); return 1; }
         if (watchdog != 6) {

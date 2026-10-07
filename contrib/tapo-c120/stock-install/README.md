@@ -10,12 +10,22 @@ repository folder on Windows:
 .\contrib\tapo-c120\stock-install\c120-install.cmd CAMERA_IP
 ```
 
-The tested firmware is already in `kit/`; there is nothing to build or copy to
+On Linux or macOS:
+
+```sh
+sh contrib/tapo-c120/stock-install/c120-install CAMERA_IP
+```
+
+The sensor-specific firmware is already in `kit/`; there is nothing to build or copy to
 the card by hand. Enter your account and Wi-Fi details when prompted, confirm
 the verified backup, then complete OpenIPC's setup page yourself.
 
-One-time PC requirements: Python 3.11+ on PATH and WSL with Python 3 and
-`squashfs-tools` installed (`sudo apt install python3 squashfs-tools` inside WSL).
+One-time requirements: Python 3.11+ with `venv` and `pip`, plus internet access
+to install the pinned Python dependencies. Normal installation needs **no WSL,
+root/administrator access, compiler, SquashFS tools or distro package manager**.
+Use `python` on Windows or `python3` on Linux/macOS. The POSIX launcher also
+accepts `PYTHON=/path/to/python3`. A missing Python/venv must be supplied by the
+owner using their platform's normal installation method.
 Run the command with `--check-kit` instead of `CAMERA_IP` to check the PC and
 firmware without contacting a camera. A failed check stops before login.
 
@@ -23,11 +33,24 @@ Keep power and the SD card connected until the camera has booted. This is a
 verified single-bank flash, not a guarantee against hardware or power failure;
 UART recovery may still be needed if something goes wrong.
 
-## Supported device
+## Supported Devices
 
-This installer deliberately supports only C120 hardware v1.0 with stock
-`1.4.4 Build 260106 Rel.62350n` and the SC438HAI sensor. It checks the exact
-stock application, running sensor module, MAC address and flash layout.
+Both variants report C120 hardware v1.0; that label alone does not identify
+the sensor. The installer selects it automatically:
+
+| Sensor | Exact stock version | Qualification |
+| --- | --- | --- |
+| SC438HAI | `1.4.4 Build 260106 Rel.62350n` | Complete UART-free migration tested |
+| SC430AI (older C120 V1) | `1.4.1 Build 250910 Rel.58576n` | Dump-qualified; live migration pending |
+
+The older variant requires `--allow-experimental-sc430ai`, including for
+`--check-only`. Without that acknowledgement it stops before preparation.
+It uses its own SC430AI kernel/rootfs, driver, IQ and 2560x1440/30 fps defaults.
+This is not a claim that every C120 V1 or every stock release is supported.
+In particular, an older sensor with a different stock build is not silently
+accepted. See [COMPATIBILITY.md](COMPATIBILITY.md) for the offline evidence.
+
+The installer checks the exact stock application, running sensor module, MAC address and flash layout.
 Other versions stop before flashing. Existing OpenIPC cameras are not targets.
 
 Hardware validation on 2026-10-07: a previously stock unit at `.152` completed
@@ -40,19 +63,25 @@ Both settled stream tests decoded 899 H.264 frames over 30 seconds at
 620 frames during concurrent browser reconnections; the repeat was clean.
 This is bounded testing, not a long-term stability claim or a new cold-power-cycle test.
 
-The current kit uses the source-built SC438HAI driver tested on cam3, not the
-incompatible stock sensor module. The packed rootfs must pass executable,
-interpreter, symlink and sensor checks before any connection to the camera.
+The SC438HAI image uses the source-built driver tested on cam3, not the
+incompatible stock module. Both images pass executable, interpreter, symlink
+and sensor checks during packaging. The installer pins the entire kit manifest
+and verifies every file plus image headers, CRCs and layout before login.
+Changing a file and its manifest checksum together does not bypass that pin.
+The portable launcher and descriptor-discovering watchdog helper were tested
+offline after the original hardware trial; the revised installer has not been
+used to reflash an existing OpenIPC camera.
 
 ## Install
 
 1. Pair the new camera normally in Tapo and connect it to 2.4 GHz Wi-Fi.
 2. Insert a working, camera-formatted SD card with at least 64 MiB free.
    Keep the camera powered and the card inserted throughout installation.
-3. On Windows, open a terminal in the repository folder and run:
+3. Open a terminal in the repository folder and run the launcher above.
+   For an older SC430AI camera on the exact supported stock build:
 
    ```powershell
-   .\contrib\tapo-c120\stock-install\c120-install.cmd CAMERA_IP
+   .\contrib\tapo-c120\stock-install\c120-install.cmd CAMERA_IP --allow-experimental-sc430ai
    ```
 
 4. Enter the Tapo account credentials, then the Wi-Fi name and password to
@@ -63,9 +92,11 @@ interpreter, symlink and sensor checks before any connection to the camera.
 6. Verify picture, audio and network access before moving the camera.
 
 The first launcher run creates a private Python environment and installs
-Paramiko and tftpy. Python 3.11+ and WSL with Python 3 and `unsquashfs` must
-already be available. The camera must reach this PC over TFTP (UDP 69 and
-the negotiated transfer port). `--bind PC_IP` selects the reachable PC address
+the pinned cryptography, Paramiko and tftpy dependencies. Subsequent runs
+check those requirements without upgrading them. The camera must reach this
+PC over TFTP (**UDP 1069** and the negotiated transfer port).
+`--tftp-port PORT` selects another unprivileged port (1024-65535).
+`--bind PC_IP` selects the reachable PC address
 when automatic route selection is unsuitable. Use only a trusted local network.
 
 `--check-kit` only validates local artifacts. `--check-only` stages temporary,
@@ -88,7 +119,7 @@ Normal stock MTD reads substitute part of the rootfs header, so they are not
 accepted as a physical backup. Recovery uses the vendor physical-read ioctl.
 Stock services are paused, their flash filesystem remounted read-only, and an
 independent watchdog feeder is observed for two watchdog periods first.
-The feeder duplicates the stock monitor's existing watchdog descriptor using
+The feeder discovers and duplicates the stock monitor's existing watchdog descriptor using
 the kernel's [pidfd_getfd API](https://man7.org/linux/man-pages/man2/pidfd_getfd.2.html).
 It does not depend on the command shell inheriting that descriptor, nor try
 to reopen an exclusively owned watchdog device.
@@ -105,33 +136,41 @@ boot problem can still require UART recovery.
 
 ## Rebuild And Test
 
-Normal installations use the included kit. It is the fixed, hardware-tested
-2026-10-07 snapshot, not a download of whatever firmware happens to be latest.
+Normal installations use the included kit, not a download of whatever firmware
+happens to be latest. SC438HAI uses the 2026-10-07 hardware-tested image;
+SC430AI uses the 2026-10-04 QHD/30 build, checked offline but not flashed as
+this exact snapshot. The latter predates the newer speaker defaults.
 Optional Lights, Wi-Fi recovery and AI plugins are installed separately; see
 the [C120 guide](../README.md#installable-extras).
 
 Maintainers can package newly validated artifacts with
-`python c120_build_install_kit.py --source PRIVATE_STAGE --output NEW_DIRECTORY`.
-The private stage must contain `sd-stage/` (the rescue runtime, flash writer,
-bootloader and environment), `sc438hai-source-build/` (kernel and rootfs), and
-`main_1.4.4` (stock application for its identity hash). These private research
-inputs are deliberately not published. The builder sanitizes Wi-Fi/MAC values
-and compiles the watchdog helper from `c120_rescue_guard.c`; `--cc` selects the
-OpenIPC ARM cross-compiler. Do not overwrite the tested kit with an untested
-build. Source for the physical writer is `mtd_offset_write.c`.
+`python c120_build_install_kit.py --source INPUT_KIT --output NEW_DIRECTORY`.
+This **maintainer build step**, unlike installation, needs Linux, `unsquashfs`
+and an OpenIPC ARM cross-compiler selected with `--cc`. The input uses the
+same layout as `kit/`, including `sc430ai/` kernel/rootfs images. The builder
+sanitizes Wi-Fi/MAC values, compiles both recovery helpers from source, validates
+both root filesystems and prints the new manifest hash. Review the artifacts
+and tests before updating `MANIFEST_SHA256`; packaging alone is not hardware
+validation. Private stock dumps are not included in the repository.
 
 Run these checks from this `stock-install` directory:
 
 ```powershell
 python test_c120_install.py
 python test_c120_prepare_raw.py
-wsl python3 test_c120_stock_recovery_flash.py
-wsl python3 test_c120_rescue_guard.py
+python test_tapo_client.py
+python test_c120_tftp.py
 .\c120-install.cmd --check-kit
 ```
 
-Tests cover malformed identities, command lengths, binary read-back, truncated
-backups, cancellation, preflight failure, flash order and rollback behavior.
+On Linux also run `python3 test_c120_stock_recovery_flash.py` and
+`python3 test_c120_rescue_guard.py`. The portable CI matrix covers Ubuntu,
+Windows and macOS; the whole runtime suite also validates the boot files.
+Local verification was performed on Windows and Linux, not macOS.
+
+Tests cover both sensor profiles, kit pinning, malformed identities, command
+lengths, AES compatibility, factory-mode cleanup, read-only TFTP, binary read-back,
+truncated backups, cancellation, preflight failure, flash order and rollback.
 The previous broken rootfs is rejected by the startup checker. A successful
 test run alone is not proof that a physical camera boots and streams.
 

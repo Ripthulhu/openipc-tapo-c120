@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise flash order and rollback without opening a device (Linux host)."""
 import os
+from itertools import product
 from pathlib import Path
 import subprocess
 import tempfile
@@ -42,17 +43,17 @@ sys.exit(1 if str(n) in os.environ.get("FAIL_AT", "").split(",") else 0)
                       .replace("STAGE=/stage", f"STAGE={root}")
                       .replace("WRITER=$STAGE/mtdw-physical", f"WRITER={mock}")
                       .replace("\npreflight\n", "\n# Hardware preflight is tested on the camera.\n"))
-    for fail_at, expected, reboot in (
+    for sensor, (fail_at, expected, reboot) in product(('sc430ai', 'sc438hai'), (
         ("", ["/dev/mtd15", "/dev/mtd15", "/dev/mtd1", "/dev/mtd0"], True),
         ("1", ["/dev/mtd15", "/dev/mtd15"], True),
         ("3", ["/dev/mtd15", "/dev/mtd15", "/dev/mtd1", "/dev/mtd15", "/dev/mtd1"], True),
         ("4", ["/dev/mtd15", "/dev/mtd15", "/dev/mtd1", "/dev/mtd0", "/dev/mtd15", "/dev/mtd1", "/dev/mtd0"], True),
         ("compare", ["/dev/mtd15", "/dev/mtd15", "/dev/mtd1", "/dev/mtd0", "/dev/mtd15", "/dev/mtd1", "/dev/mtd0"], True),
         ("1,2", ["/dev/mtd15", "/dev/mtd15"], False),
-    ):
+    )):
         for name in ("calls", "counter"):
             (root / name).unlink(missing_ok=True)
-        result = subprocess.run(["sh", str(script), "--flash", "--yes-i-understand", "test"],
+        result = subprocess.run(["sh", str(script), "--flash", "--yes-i-understand", "test", sensor],
                                 env=dict(os.environ, FAIL_AT=fail_at), capture_output=True, text=True)
         calls = (root / "calls").read_text().splitlines()
         writes = [line.split()[1] for line in calls if line.startswith("stock-write-stream ")]
@@ -61,6 +62,7 @@ sys.exit(1 if str(n) in os.environ.get("FAIL_AT", "").split(",") else 0)
         assert (result.returncode == 0) == reboot, result.stderr
         if fail_at and reboot:
             assert "STOCK_ROLLBACK_PHYSICAL_VERIFY_OK" in result.stdout
-    for args in ([], ["--flash"], ["--flash", "bad-confirmation", "test"]):
+    for args in ([], ["--flash"], ["--flash", "bad-confirmation", "test", "sc430ai"],
+                 ["--preflight", "test", "unknown"], ["--flash", "--yes-i-understand", "test"]):
         assert subprocess.run(["sh", str(script), *args], capture_output=True).returncode == 2
 print("flash order, partial-write rollback, failed-rollback no-reboot, and argument guards: PASS")

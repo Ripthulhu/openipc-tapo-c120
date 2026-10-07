@@ -1,20 +1,12 @@
 #!/usr/bin/env python3
-"""Run one stock C120 1.4.4 command without leaving factory mode enabled."""
+"""Bounded C120 preparation commands; always restore factory mode to off."""
 
-import argparse
-import getpass
-import os
 import re
 import secrets
-import sys
 
-from tapo_c120_repl import (
-    TapoSession,
+from tapo_client import (
     encode_traversal_path,
     http_request,
-    is_private_target,
-    login_once,
-    sha256_hex,
 )
 
 
@@ -72,24 +64,3 @@ def run(session, command):
     if not lines or not lines[-1].strip().isdigit():
         raise RuntimeError("Command did not leave an exit status")
     return int(lines[-1].strip()), b"\n".join(lines[:-1]).decode("utf-8", "replace")
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", required=True)
-    parser.add_argument("--user", required=True)
-    parser.add_argument("command")
-    args = parser.parse_args()
-    if not is_private_target(args.host):
-        parser.error("Camera address must be private")
-    password = os.environ.get("TAPO_PASSWORD") or getpass.getpass("Tapo password: ")
-    password_hash = sha256_hex(password)
-    session = TapoSession(args.host, password_hash, login_once(args.host, args.user, password_hash))
-    status, output = run(session, args.command)
-    if output:
-        print(output)
-    return status
-
-
-if __name__ == "__main__":
-    sys.exit(main())

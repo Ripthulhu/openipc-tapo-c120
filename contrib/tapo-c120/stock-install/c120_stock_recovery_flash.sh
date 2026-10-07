@@ -7,11 +7,20 @@ STAGE=/stage
 WRITER=$STAGE/mtdw-physical
 MODE=${1:-}
 case "$MODE:$#" in
-    --preflight:2) MAC=$2 ;;
-    --flash:3)
+    --preflight:3) MAC=$2 SENSOR=$3 ;;
+    --flash:4)
         [ "$2" = --yes-i-understand ] || exit 2
-        MAC=$3 ;;
-    *) echo "usage: $0 --preflight MAC | --flash --yes-i-understand MAC" >&2; exit 2 ;;
+        MAC=$3 SENSOR=$4 ;;
+    *) echo "usage: $0 --preflight MAC SENSOR | --flash --yes-i-understand MAC SENSOR" >&2; exit 2 ;;
+esac
+case "$SENSOR" in
+    sc438hai)
+        MODULE=drv_ms_cus_sc438hai_2lane
+        MAIN_SHA=ab1dd0d2ab8f2f29de17185dd0460fe4a28961008f6a433684f9eb4065f6803d ;;
+    sc430ai)
+        MODULE=drv_ms_cus_sc430ai_MIPI_tp_ww
+        MAIN_SHA=6ea2fd02fa952dd998e433405c797a4b7686714f9eafabcd898e91dfa38adbef ;;
+    *) echo "Unsupported sensor" >&2; exit 2 ;;
 esac
 
 die() { echo "$*" >&2; exit 1; }
@@ -20,7 +29,8 @@ preflight() {
     [ "$($BB readlink /proc/self/root)" = / ] || die "Unexpected recovery root"
     [ -f /etc/dropbear_ed25519_host_key ] || die "Recovery runtime missing"
     [ "$($BB cat /sys/class/net/wlan0/address)" = "$MAC" ] || die "Wrong camera MAC"
-    $BB grep -q '^drv_ms_cus_sc438hai_2lane ' /proc/modules || die "Wrong sensor module"
+    $BB grep -q "^$MODULE " /proc/modules || die "Wrong sensor module"
+    [ "$($BB sha256sum /host/bin/main | $BB cut -d ' ' -f 1)" = "$MAIN_SHA" ] || die "Wrong stock application"
     $BB grep -qx 'mtd0: 00030000 00001000 "factory_boot"' /proc/mtd || die "Wrong boot partition"
     $BB grep -qx 'mtd1: 00010000 00001000 "factory_info"' /proc/mtd || die "Wrong boot tail partition"
     $BB grep -qx 'mtd15: 00fc0000 00001000 "af"' /proc/mtd || die "Wrong aggregate partition"

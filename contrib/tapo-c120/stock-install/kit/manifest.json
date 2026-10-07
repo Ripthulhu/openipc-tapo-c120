@@ -1,20 +1,19 @@
 {
-  "version": 1,
-  "sensor": "sc438hai",
-  "stockVersion": "1.4.4 Build 260106 Rel.62350n",
-  "stockMainSha256": "ab1dd0d2ab8f2f29de17185dd0460fe4a28961008f6a433684f9eb4065f6803d",
+  "version": 2,
   "files": {
     "busybox": "0eb17f4c05885638216898f2ce73450a54ae969b66fed54627d01feec9514a75",
     "libc.so": "e72b2039a558b8f754a6c85513e19cd1f9a9542ba67ad4d6499ffb0b4eee9afd",
-    "rescue-guard": "cceeb1472a0793b1c8e8fdab08393ce9df428dfbbfb8403e45f6cb795293f126",
+    "rescue-guard": "697c9736734cff733b6727fc934dd3fc6119f901a12deca86bcafe49349fc43d",
     "rescue-runtime.tgz": "e4726e908f240fed4b30ed5c18b1e451305bef990132dd20b44e640ed590ba4e",
     "mtdw-physical": "7004067039cb71074de02da4a1ac61914a256d7bbfd751b4e0d98d3177b6715c",
     "rescue-init.sh": "8959802e6640fb073eb7b58c431dc2a78c2fd55d5d7b114326da900af2683ca5",
-    "recovery-flash.sh": "d99636f9cdcd63e772c65bd93ad5acddc1747d6298a02fa81fbc5ecfd676c893",
+    "recovery-flash.sh": "ed656e2e1bc77e7efd5645a9b9b848418220ad69ac6c1e8fea1188be39c06260",
     "quiesce.sh": "769b2f3d64ef0f03124477ca09361a9c8d7b2eb68ff29adc7a99441638826c1b",
     "openipc-env.bin": "572b171b37f3779494b855a07f998c622ef35e32471c708fff7e3fb9a80ce1ee",
     "u-boot-ssc377-nor.bin": "0bda52f94ca6f935a033e9ba20e684fe11b652c2028277e32a15ffb14abc82f2",
     "uImage.ssc377": "e7fce4772fdbf26f2b0bba39dea63390ea8be0319c848ed66b8018fe642c95e5",
-    "rootfs.squashfs.ssc377": "4e161eae0102a02f383767b108bd9d4fa7940bf3dcb816cc251f1b4a279c3491"
+    "rootfs.squashfs.ssc377": "4e161eae0102a02f383767b108bd9d4fa7940bf3dcb816cc251f1b4a279c3491",
+    "sc430ai/uImage.ssc377": "0719396c7af5386037d2551825de21f942cfc3980888b8c7c7fd57cf38be1648",
+    "sc430ai/rootfs.squashfs.ssc377": "9663b8f81db8b5086afc603d8a8bef9a281a8d55c18b4cd0175c61dd0f0b0fcb"
   }
 }

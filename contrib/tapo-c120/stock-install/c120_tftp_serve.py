@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve staged files to one camera, optionally receiving one named backup."""
+"""Serve public bootstrap files read-only to one camera."""
 
 import argparse
 import tempfile
@@ -13,34 +13,28 @@ def main():
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--bind", required=True)
     parser.add_argument("--client", required=True)
-    parser.add_argument("--receive", type=Path, help="accept this basename into a new local file")
+    parser.add_argument("--port", type=int, default=1069)
     args = parser.parse_args()
     root = args.root.resolve(strict=True)
     if not root.is_dir():
         parser.error("root must be a directory")
-    if args.receive and (args.receive.exists() or not args.receive.parent.is_dir()):
-        parser.error("receive file must be new and its parent must exist")
+    if not 1024 <= args.port <= 65535:
+        parser.error("port must be 1024-65535")
 
     def read_file(name, raddress, rport):
         if raddress != args.client or Path(name).name != name or "\\" in name:
             return None
         path = root / name
-        return path.open("rb") if path.is_file() else None
-
-    def receive_file(path, context):
-        if (not args.receive or context.host != args.client or
-                context.file_to_transfer != args.receive.name):
-            return None
-        return args.receive.open("xb")
+        return path.open("rb") if path.is_file() and not path.is_symlink() else None
 
     with tempfile.TemporaryDirectory() as empty_root:
         server = tftpy.TftpServer(
             tftproot=empty_root,
             dyn_file_func=read_file,
-            upload_open=receive_file,
+            upload_open=lambda path, context: None,
         )
-        print(f"Serving {root} to {args.client} on {args.bind}:69", flush=True)
-        server.listen(args.bind, 69)
+        print(f"Serving {root} to {args.client} on {args.bind}:{args.port}", flush=True)
+        server.listen(args.bind, args.port)
 
 
 if __name__ == "__main__":

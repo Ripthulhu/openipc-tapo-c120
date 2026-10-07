@@ -9,9 +9,6 @@ set "PYTHON=%~dp0.venv-c120-install\Scripts\python.exe"
 if not exist "%PYTHON%" (
     python -m venv "%~dp0.venv-c120-install" || exit /b 1
 )
-"%PYTHON%" -c "import paramiko,tftpy" >nul 2>&1
-if errorlevel 1 (
-    "%PYTHON%" -m pip install paramiko==5.0.0 tftpy==0.8.7 || exit /b 1
-)
+"%PYTHON%" -m pip install --disable-pip-version-check -q -r "%~dp0requirements.txt" || exit /b 1
 "%PYTHON%" "%~dp0c120_install.py" %*
 exit /b %errorlevel%

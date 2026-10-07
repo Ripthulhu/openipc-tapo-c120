@@ -19,6 +19,26 @@ def validate_rootfs(image, sensor=None):
         subprocess.run(["unsquashfs", "-no-progress", "-no-xattrs", "-d", str(root), str(image)],
                        check=True, stdout=subprocess.DEVNULL)
         subprocess.run([sys.executable, str(checker), str(root)], check=True)
+        root_account = next(line for line in (root / "etc/shadow").read_text().splitlines()
+                            if line.startswith("root:"))
+        if root_account.split(":")[1] or list(root.glob("etc/dropbear/*_key")):
+            raise ValueError("Rootfs contains an owner password or SSH host key")
+        if sensor == "sc430ai":
+            expected = {
+                "lib/modules/5.10.61/sigmastar/sensor_sc430ai_mipi.ko":
+                    "06f4bd5c88641ad647b5c97186dcb5b7a4118f5b38162e04371c920aed3d1a94",
+                "etc/sensors/sc430ai.bin":
+                    "a76e0055331536ddc85f196d52fb406029e08e234244b8bbb4c98fd337c8926f",
+            }
+            for name, digest in expected.items():
+                if hashlib.sha256((root / name).read_bytes()).hexdigest() != digest:
+                    raise ValueError("Unvalidated SC430AI component: " + name)
+            customizer = (root / "usr/share/openipc/customizer.sh").read_text()
+            for setting in ("fw_setenv sensor sc430ai", "cli -s .video0.size 2560x1440",
+                            "cli -s .video0.fps 30"):
+                if setting not in customizer.splitlines():
+                    raise ValueError("Missing SC430AI first-boot setting: " + setting)
+            print("SC430AI: source driver, IQ and QHD/30 first-boot selection OK (offline)")
         if sensor == "sc438hai":
             module = root / "lib/modules/5.10.61/sigmastar/sensor_sc438hai_mipi.ko"
             iq = root / "etc/sensors/sc438hai.bin"

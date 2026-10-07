@@ -24,12 +24,26 @@ ROOT = HERE
 from c120_prepare_env import build_env, parse_env
 from c120_prepare_raw import assemble
 from tapo_c120_factory_exec import run as factory_run
-from tapo_c120_repl import TapoSession, encode_traversal_path, http_request, login_once, sha256_hex
+from tapo_client import TapoSession, encode_traversal_path, http_request, login_once, sha256_hex
 
 FILES = ('busybox', 'libc.so', 'rescue-guard', 'rescue-runtime.tgz', 'mtdw-physical',
          'rescue-init.sh', 'recovery-flash.sh', 'quiesce.sh', 'openipc-env.bin',
-         'u-boot-ssc377-nor.bin', 'uImage.ssc377', 'rootfs.squashfs.ssc377')
+         'u-boot-ssc377-nor.bin', 'uImage.ssc377', 'rootfs.squashfs.ssc377',
+         'sc430ai/uImage.ssc377', 'sc430ai/rootfs.squashfs.ssc377')
 BB = '/bin/busybox '
+MANIFEST_SHA256 = 'bf8039c9e0c6c0f29dfbeb4ef58fa6d7fb2ff37e3b385cb9f5050d62a900b3a6'
+PROFILES = {
+    'sc438hai': {
+        'version': '1.4.4 Build 260106 Rel.62350n',
+        'main': 'ab1dd0d2ab8f2f29de17185dd0460fe4a28961008f6a433684f9eb4065f6803d',
+        'module': 'drv_ms_cus_sc438hai_2lane',
+    },
+    'sc430ai': {
+        'version': '1.4.1 Build 250910 Rel.58576n',
+        'main': '6ea2fd02fa952dd998e433405c797a4b7686714f9eafabcd898e91dfa38adbef',
+        'module': 'drv_ms_cus_sc430ai_MIPI_tp_ww',
+    },
+}
 
 
 def digest(path):
@@ -58,8 +72,10 @@ def checksum_file(folder, names, destination):
 
 
 def check_kit(kit):
+    if digest(kit / 'manifest.json') != MANIFEST_SHA256:
+        raise ValueError('Unreviewed kit manifest; use the kit shipped with this installer')
     manifest = json.loads((kit / 'manifest.json').read_text())
-    if (manifest.get('sensor') != 'sc438hai' or manifest.get('version') != 1 or
+    if (manifest.get('version') != 2 or
             set(manifest.get('files', {})) != set(FILES)):
         raise ValueError('Unsupported or incomplete installation kit')
     for name in FILES:
@@ -68,19 +84,24 @@ def check_kit(kit):
             raise ValueError('Kit checksum mismatch: ' + name)
         if name.endswith('.sh') and b'\r' in path.read_bytes():
             raise ValueError('Windows line endings in ' + name)
-    # Inspect the packed image on Linux, where SquashFS links and modes are real.
+    # The pinned hashes bind the images to the maintainer's unpacked startup
+    # checks. Installation itself needs neither Linux tools nor WSL.
     with tempfile.TemporaryDirectory(prefix='c120-kit-check-') as temp:
-        output = Path(temp) / 'checked.bin'
-        script = HERE / 'c120_prepare_raw.py'
-        arguments = [str(script), str(kit), str(output)]
-        if os.name == 'nt':
-            arguments = [subprocess.check_output(['wsl', '--exec', 'wslpath', '-a', Path(p).as_posix()], text=True).strip() for p in arguments]
-            command = ['wsl', '--exec', 'python3', *arguments]
-        else:
-            command = [sys.executable, *arguments]
         template_mac = parse_env((kit / 'openipc-env.bin').read_bytes())[b'ethaddr'].decode()
-        subprocess.run([*command, '--mac', template_mac, '--sensor', 'sc438hai'], check=True)
+        for sensor in PROFILES:
+            prepare_private_image(kit, Path(temp), template_mac, 'CHANGE_ME', 'CHANGE_ME', sensor)
     return manifest
+
+
+def select_profile(info, modules):
+    if info.get('device_model') != 'C120' or info.get('hw_version') != '1.0':
+        raise ValueError('Not a supported stock C120 v1.0')
+    loaded = {line.split()[0] for line in modules.splitlines() if line.strip()}
+    matches = [sensor for sensor, profile in PROFILES.items()
+               if info.get('sw_version') == profile['version'] and profile['module'] in loaded]
+    if len(matches) != 1:
+        raise ValueError('Unsupported stock version/sensor pair; refusing to change it')
+    return matches[0]
 
 
 def stock(session, command):
@@ -169,7 +190,7 @@ def connect_recovery(session, work):
     return ssh
 
 
-def bootstrap(session, work, kit, bind, mac):
+def bootstrap(session, work, kit, bind, mac, port):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     key = Ed25519PrivateKey.generate()
@@ -192,17 +213,17 @@ def bootstrap(session, work, kit, bind, mac):
              "test \"$(df /tmp/mnt/harddisk_1 | awk 'END {print $4}')\" -ge 65536",
              'mkdir ' + stage, 'cd ' + stage]
     for name in (*names, 'recovery.pub', 'rescue.sha256'):
-        lines += [f'tftp -g -r {name} -l {name}.part {bind}', f'mv {name}.part {name}']
+        lines += [f'tftp -g -r {name} -l {name}.part {bind} {port}', f'mv {name}.part {name}']
     lines += ['trap - 0', 'echo BOOTSTRAP_READY']
     (public / 'b.sh').write_text('\n'.join(lines) + '\n', encoding='ascii', newline='\n')
     log = (work / 'tftp.log').open('wb')
     server = subprocess.Popen([sys.executable, str(HERE / 'c120_tftp_serve.py'), '--root', str(public),
-                               '--bind', bind, '--client', session.host], stdout=log, stderr=log)
+                               '--bind', bind, '--client', session.host, '--port', str(port)], stdout=log, stderr=log)
     try:
         time.sleep(1)
         if server.poll() is not None:
-            raise RuntimeError('TFTP listener did not start; see tftp.log (UDP port 69)')
-        stock(session, f'tftp -g -r b.sh -l /tmp/oif {bind}')
+            raise RuntimeError(f'TFTP listener did not start; see tftp.log (UDP port {port})')
+        stock(session, f'tftp -g -r b.sh -l /tmp/oif {bind} {port}')
         verify_stock_file(session, '/tmp/oif', public / 'b.sh')
         stock(session, 'sh /tmp/oif </dev/null >/tmp/oif.log 2>&1 &')
         for _ in range(60):
@@ -228,15 +249,19 @@ def bootstrap(session, work, kit, bind, mac):
         log.close()
 
 
-def prepare_private_image(kit, work, mac, ssid, password):
+def prepare_private_image(kit, work, mac, ssid, password, sensor):
+    if sensor not in PROFILES:
+        raise ValueError('Unsupported sensor')
     if not 1 <= len(ssid.encode()) <= 32 or not (8 <= len(password.encode()) <= 63 or re.fullmatch('[0-9a-fA-F]{64}', password)):
         raise ValueError('Expected a 1-32 byte SSID and WPA2 password (8-63 bytes or 64 hex digits)')
     env = parse_env((kit / 'openipc-env.bin').read_bytes())
-    env.update({b'ethaddr': mac.encode(), b'wlanssid': ssid.encode(), b'wlanpass': password.encode()})
+    env.update({b'ethaddr': mac.encode(), b'wlanssid': ssid.encode(), b'wlanpass': password.encode(),
+                b'sensor': sensor.encode()})
     for name in ('u-boot-ssc377-nor.bin', 'uImage.ssc377', 'rootfs.squashfs.ssc377'):
-        shutil.copyfile(kit / name, work / name)
+        folder = kit / 'sc430ai' if sensor == 'sc430ai' and name != 'u-boot-ssc377-nor.bin' else kit
+        shutil.copyfile(folder / name, work / name)
     (work / 'openipc-env.bin').write_bytes(build_env(env))
-    (work / 'openipc-raw.bin').write_bytes(assemble(work, mac, 'sc438hai'))
+    (work / 'openipc-raw.bin').write_bytes(assemble(work, mac, sensor))
     os.chmod(work / 'openipc-raw.bin', 0o600)
 
 
@@ -284,12 +309,17 @@ def main():
     parser.add_argument('--check-only', action='store_true', help='temporary recovery/readiness checks; never freezes or flashes')
     parser.add_argument('--resume', type=Path, help='private run folder; resume preparation only, never an attempted flash')
     parser.add_argument('--bind', help='PC LAN IPv4 address reachable by the camera for TFTP')
+    parser.add_argument('--tftp-port', type=int, default=1069, help='unprivileged UDP listener port (default: 1069)')
+    parser.add_argument('--allow-experimental-sc430ai', action='store_true',
+                        help='acknowledge that SC430AI migration is dump-qualified, not live-flash-tested')
     args = parser.parse_args()
+    if not 1024 <= args.tftp_port <= 65535:
+        parser.error('--tftp-port must be between 1024 and 65535; no administrator/root needed')
     os.umask(0o077)
     kit = args.kit.resolve()
-    manifest = check_kit(kit)
+    check_kit(kit)
     if args.check_kit:
-        print('KIT_OK: packed boot files and SC438HAI source driver validated; no camera contacted')
+        print('KIT_OK: pinned SC438HAI and SC430AI images, layout and CRCs verified; no camera contacted')
         return
     host = private_ip(args.host or input('Stock camera IP: ').strip())
     username = input('Tapo account email: ').strip()
@@ -301,8 +331,15 @@ def main():
     result = response['result']['responses'][0]
     info = result.get('result', result)['device_info']['basic_info']
     if (info.get('device_model') != 'C120' or info.get('hw_version') != '1.0' or
-            info.get('sw_version') != manifest['stockVersion']):
-        raise ValueError('Not the supported stock C120 firmware; refusing to change it')
+            info.get('sw_version') not in {p['version'] for p in PROFILES.values()}):
+        raise ValueError('Unsupported stock C120 hardware or firmware; refusing to change it')
+    if info['sw_version'] == PROFILES['sc430ai']['version']:
+        if not args.allow_experimental_sc430ai:
+            raise ValueError('Older SC430AI migration is dump-qualified only. Review README, then use --allow-experimental-sc430ai')
+        print('SC430AI: offline-qualified path; a complete UART-free migration has not been tested on hardware.', flush=True)
+    # Stock HTTP file serving may use stat size, which is zero for /proc files.
+    sensor = select_profile(info, stock(session, 'cat /proc/modules'))
+    profile = PROFILES[sensor]
     mac = mac_address(info['mac'])
     work = args.resume.resolve() if args.resume else ROOT / 'private-runs' / (mac.replace(':', '') + '-' + time.strftime('%Y%m%d-%H%M%S'))
     if not args.resume:
@@ -320,21 +357,21 @@ def main():
         stage = state['stage']
         ssh = connect_recovery(session, work)
     else:
-        ssh, stage = bootstrap(session, work, kit, bind, mac)
+        ssh, stage = bootstrap(session, work, kit, bind, mac, args.tftp_port)
     frozen = launched = False
     try:
         remote(ssh, 'set -eu; for f in /var/run/stock-pids /var/run/watchdog.pid /stage/physical-flash.log /stage/raw-stock-quiesced.bin; do test ! -e "$f"; done')
         observed = mac_address(remote(ssh, BB + 'cat /sys/class/net/wlan0/address').strip())
-        if observed != mac or remote(ssh, BB + 'sha256sum /host/bin/main').split()[0] != manifest['stockMainSha256']:
+        if observed != mac or remote(ssh, BB + 'sha256sum /host/bin/main').split()[0] != profile['main']:
             raise ValueError('Camera identity or exact stock application differs; refusing to continue')
-        remote(ssh, BB + "grep -q '^drv_ms_cus_sc438hai_2lane ' /proc/modules")
+        remote(ssh, BB + "grep -q '^" + profile['module'] + " ' /proc/modules")
         remote(ssh, BB + "grep -qx 'mtd15: 00fc0000 00001000 \"af\"' /proc/mtd")
         if args.check_only:
             print('READINESS_OK: exact stock application, sensor and recovery SSH verified. No flash writes. Reboot clears temporary SSH.')
             return
         ssid = input('OpenIPC Wi-Fi SSID (2.4 GHz): ')
         wifi = getpass.getpass('Wi-Fi password: ')
-        prepare_private_image(kit, work, mac, ssid, wifi)
+        prepare_private_image(kit, work, mac, ssid, wifi, sensor)
         for name in ('rescue-guard', 'mtdw-physical', 'recovery-flash.sh', 'quiesce.sh'):
             shutil.copyfile(kit / name, work / name)
             upload(ssh, work / name, name)
@@ -347,13 +384,13 @@ def main():
         backup(ssh, work)
         checksum_file(work, ('openipc-raw.bin', 'raw-stock-quiesced.bin', 'mtdw-physical', 'recovery-flash.sh'), 'physical-flash.sha256')
         upload(ssh, work / 'physical-flash.sha256', 'physical-flash.sha256')
-        print(remote(ssh, BB + 'sh /stage/recovery-flash.sh --preflight ' + mac, 180), flush=True)
+        print(remote(ssh, BB + 'sh /stage/recovery-flash.sh --preflight ' + mac + ' ' + sensor, 180), flush=True)
         if input(f'Backup verified. Type FLASH {mac} to replace stock firmware: ').strip() != 'FLASH ' + mac:
             print('Cancelled. Restoring stock services; no flash writes.')
             return
         # An ambiguous SSH outcome must never cause a second launch or a stock-service resume.
         launched = True
-        remote(ssh, "trap '' HUP; " + BB + 'setsid ' + BB + 'sh /stage/recovery-flash.sh --flash --yes-i-understand ' + mac +
+        remote(ssh, "trap '' HUP; " + BB + 'setsid ' + BB + 'sh /stage/recovery-flash.sh --flash --yes-i-understand ' + mac + ' ' + sensor +
                ' </dev/null >/stage/physical-flash.log 2>&1 &', 15)
         monitor(ssh, host, work)
     finally:
