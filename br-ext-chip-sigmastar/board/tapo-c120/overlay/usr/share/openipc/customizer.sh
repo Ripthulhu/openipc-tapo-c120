@@ -35,7 +35,8 @@ cli -s .video0.size 2560x1440
 cli -s .video0.fps 30
 cli -s .video0.bitrate 10000
 cli -s .video0.rcMode cbr
-cli -s .video0.gopSize 2
+# /video.mp4 holds a whole GOP in 1 MiB; 2 seconds at 10 Mbit/s overflows it.
+cli -s .video0.gopSize 0.5
 cli -s .video1.enabled false
 cli -s .jpeg.enabled false
 

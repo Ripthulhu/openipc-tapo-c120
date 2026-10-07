@@ -78,7 +78,7 @@ The board profile sets:
 - IR-cut GPIO81 with inverted single-coil polarity
 - camera light leader GPIO12
 - native automatic day/night: 16x gain for night, 2x for day, 15/60-second delays
-- 2560x1440 H.264 at 30 fps, 10000 kbps CBR, GOP 2 seconds (60 frames)
+- 2560x1440 H.264 at 30 fps, 10000 kbps CBR, GOP 0.5 seconds (15 frames)
 - maximum exposure 33 ms for stable frame delivery
 - 48 kHz mono Opus microphone at level 50; speaker enabled at level 80 on GPIO43
 - JPEG, video1, motion detect, records, and crond disabled by default
