@@ -1,0 +1,24 @@
+#!/bin/sh
+
+# A small RAM-only swap cushion; /etc/zram.disabled opts out on the next boot.
+case "$1" in
+	start)
+		[ -e /etc/zram.disabled ] && exit 0
+		zram=/sys/block/zram0
+		[ -b /dev/zram0 ] && [ -w "$zram/disksize" ] || exit 0
+		[ "$(cat "$zram/disksize")" = 0 ] || exit 0
+		echo lz4 > "$zram/comp_algorithm" || exit 1
+		echo 8M > "$zram/mem_limit" || exit 1
+		echo 16M > "$zram/disksize" || exit 1
+		if ! mkswap /dev/zram0 >/dev/null 2>&1 || ! swapon /dev/zram0; then
+			echo 1 > "$zram/reset" || true
+			exit 1
+		fi
+		;;
+	stop)
+		;;
+	*)
+		echo "Usage: $0 {start|stop}"
+		exit 1
+		;;
+esac
