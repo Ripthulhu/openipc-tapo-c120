@@ -39,8 +39,15 @@ trap 'rm -rf "$work"' EXIT
 # environment that those are no-ops and only the excludes block does work.
 ext="$work/general"
 mkdir -p "$ext/scripts/excludes"
+cp general/scripts/check-rootfs-startup.py "$ext/scripts/"
 target="$work/target"
 mkdir -p "$target/usr/lib/sensors" "$target/etc/sensors" "$target/usr/lib"
+# The post-build check also requires a minimal bootable-file fixture.
+for name in init bin/sh sbin/init linuxrc usr/sbin/cli; do
+	mkdir -p "$(dirname "$target/$name")"
+	printf '\177ELF fixture\n' > "$target/$name"
+	chmod +x "$target/$name"
+done
 : > "$target/usr/lib/sensors/libsns_present.so"
 : > "$target/etc/sensors/present.ini"
 ln -s /nowhere "$target/etc/sensors/broken.ini"     # dangling symlink: -e is false, it must still go

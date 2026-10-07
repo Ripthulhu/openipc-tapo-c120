@@ -54,8 +54,10 @@ driver port now registers long/short planes and passes host timing/gain tests
 and an ARM module build. It also passed a linear QHD30 regression on `.101`.
 HDR frames are NOT validated: the current Majestic binary explicitly selects
 linear plane mode; four-lane PCB routing and suitable HDR ISP tuning are still
-unverified. HDR integration/testing was stopped at the user's request and the
-camera retains its proven linear-only module. The older SC430AI stock driver
+unverified. HDR integration/testing was stopped at the user's request. The
+2026-10-07 installer refresh includes this source driver; cam4 passed two
+boots and QHD30 stream checks in linear mode. This does not enable or validate
+HDR, nor update cam3's deployed module. The older SC430AI stock driver
 also contains HDR paths; our deployed SC430AI source remains linear-only.
 The stock alternate night IQ profiles are not validated. Automatic day/night is
 configured, but a physical lens-cover transition test is still outstanding

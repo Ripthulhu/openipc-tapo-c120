@@ -63,8 +63,8 @@ Both settled stream tests decoded 899 H.264 frames over 30 seconds at
 620 frames during concurrent browser reconnections; the repeat was clean.
 This is bounded testing, not a long-term stability claim or a new cold-power-cycle test.
 
-The SC438HAI image uses the source-built driver tested on cam3, not the
-incompatible stock module. Both images pass executable, interpreter, symlink
+The refreshed SC438HAI image uses the source-built driver tested in linear
+QHD30 mode on cam4, not the incompatible stock module. Both images pass executable, interpreter, symlink
 and sensor checks during packaging. The installer pins the entire kit manifest
 and verifies every file plus image headers, CRCs and layout before login.
 Changing a file and its manifest checksum together does not bypass that pin.
@@ -137,9 +137,14 @@ boot problem can still require UART recovery.
 ## Rebuild And Test
 
 Normal installations use the included kit, not a download of whatever firmware
-happens to be latest. SC438HAI uses the 2026-10-07 hardware-tested image;
-SC430AI uses the 2026-10-04 QHD/30 build, checked offline but not flashed as
-this exact snapshot. The latter predates the newer speaker defaults.
+happens to be latest. Both images were rebuilt on 2026-10-07 against firmware
+`5650e029`, with Majestic `0ea3123` and WebUI `a6c7cf9`. Both retain QHD/30 fps
+and the current speaker and automatic day/night defaults. The refreshed
+SC438HAI image passed an OpenIPC-to-OpenIPC upgrade, two boots and two settled
+30-second stream checks on cam4. The original stock-to-OpenIPC trial above
+used the preceding image; the refreshed kit has not repeated that migration.
+The SC430AI image passed offline checks only and remains experimental.
+See the [refresh evidence](../HISTORY.md#upstream-refresh-2026-10-07).
 Optional Lights, Wi-Fi recovery and AI plugins are installed separately; see
 the [C120 guide](../README.md#installable-extras).
 

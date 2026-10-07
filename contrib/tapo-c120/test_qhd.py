@@ -74,6 +74,37 @@ def test_pruning(root):
     print("PASS pruning: unused/used musl libraries, glibc retention, BusyBox/kmod indexes")
 
 
+def test_missing_config(root):
+    root.mkdir(parents=True)
+    config = root / "majestic.yaml"
+    script = (REPO / "general/overlay/usr/sbin/extutils").read_text()
+    write(root / "cli", script.replace("MAJESTIC_CFG=/etc/majestic.yaml", f"MAJESTIC_CFG={config}"))
+    # Model yaml-cli's missing-input refusal, without signalling a host process.
+    write(root / "yaml-cli", """#!/bin/sh
+while [ $# -gt 0 ]; do
+    case "$1" in -i|--input) shift; input=$1 ;; esac
+    shift
+done
+test -f "$input"
+""")
+    write(root / "pidof", "#!/bin/sh\nexit 1\n")
+    for name in ("cli", "yaml-cli", "pidof"):
+        (root / name).chmod(0o755)
+    env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"])
+    for args in (("-s", ".video0.fps", "30"), ("-g", ".video0.fps")):
+        subprocess.run([str(root / "cli"), *args], env=env, check=True)
+        assert config.exists(), "first CLI call needs an empty input file"
+        config.unlink()
+    other = root / "sensor.yaml"
+    other.write_text("sensor: unchanged\n")
+    subprocess.run([str(root / "cli"), "-i", str(other), "-g", ".sensor"], env=env, check=True)
+    assert not config.exists(), "a sensor CLI call must not create Majestic's config"
+    config.write_text("video0:\n  fps: 30\n")
+    subprocess.run([str(root / "cli"), "-g", ".video0.fps"], env=env, check=True)
+    assert config.read_text() == "video0:\n  fps: 30\n", "existing settings must survive"
+    print("PASS sparse config: first write/read, explicit input, existing settings preserved")
+
+
 def test_speaker_gpio(root):
     root.mkdir(parents=True)
     gpio = root / "gpio43"
@@ -152,6 +183,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="c120-qhd-test-") as tmp:
         root = Path(tmp)
         test_defaults(root / "defaults")
+        test_missing_config(root / "missing-config")
         test_speaker_gpio(root / "speaker-gpio")
         test_pruning(root / "pruning")
         test_init(root / "init")

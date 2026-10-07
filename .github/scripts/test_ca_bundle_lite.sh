@@ -39,9 +39,16 @@ trap 'rm -rf "$work"' EXIT
 ext="$work/general"
 mkdir -p "$ext/scripts"
 cp general/scripts/filter-ca-bundle.py general/scripts/ca-bundle-lite.keep "$ext/scripts/"
+cp general/scripts/check-rootfs-startup.py "$ext/scripts/"
 : > "$work/br2config"
 
 run() {	# run VARIANT TARGET -> exit status, output in $work/out.txt
+	# Satisfy the independent startup-file check in these synthetic images.
+	for name in init bin/sh sbin/init linuxrc usr/sbin/cli; do
+		mkdir -p "$(dirname "$2/$name")"
+		printf '\177ELF fixture\n' > "$2/$name"
+		chmod +x "$2/$name"
+	done
 	set +e
 	env TARGET_DIR="$2" \
 		BR2_EXTERNAL_GENERAL_PATH="$ext" \

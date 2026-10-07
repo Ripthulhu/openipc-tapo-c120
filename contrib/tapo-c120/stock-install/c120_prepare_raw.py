@@ -26,7 +26,7 @@ def validate_rootfs(image, sensor=None):
         if sensor == "sc430ai":
             expected = {
                 "lib/modules/5.10.61/sigmastar/sensor_sc430ai_mipi.ko":
-                    "06f4bd5c88641ad647b5c97186dcb5b7a4118f5b38162e04371c920aed3d1a94",
+                    "63afa8566eeaa37f84859ff1c3be01115e897885c17df3902e45dc92504a8bcf",
                 "etc/sensors/sc430ai.bin":
                     "a76e0055331536ddc85f196d52fb406029e08e234244b8bbb4c98fd337c8926f",
             }
@@ -34,7 +34,12 @@ def validate_rootfs(image, sensor=None):
                 if hashlib.sha256((root / name).read_bytes()).hexdigest() != digest:
                     raise ValueError("Unvalidated SC430AI component: " + name)
             customizer = (root / "usr/share/openipc/customizer.sh").read_text()
-            for setting in ("fw_setenv sensor sc430ai", "cli -s .video0.size 2560x1440",
+            selection = 'fw_setenv sensor "$(cat /etc/c120-sensor-model 2>/dev/null || echo sc430ai)"'
+            model = root / "etc/c120-sensor-model"
+            if (not {"fw_setenv sensor sc430ai", selection}.intersection(customizer.splitlines()) or
+                    (model.exists() and model.read_text().strip() != "sc430ai")):
+                raise ValueError("Missing SC430AI first-boot sensor selection")
+            for setting in ("cli -s .video0.size 2560x1440",
                             "cli -s .video0.fps 30"):
                 if setting not in customizer.splitlines():
                     raise ValueError("Missing SC430AI first-boot setting: " + setting)
@@ -42,7 +47,7 @@ def validate_rootfs(image, sensor=None):
         if sensor == "sc438hai":
             module = root / "lib/modules/5.10.61/sigmastar/sensor_sc438hai_mipi.ko"
             iq = root / "etc/sensors/sc438hai.bin"
-            expected = ((module, "4c8311c930cbcc8596908bf5aee2917263f4e28c0e47dfaadaaa04ec48ff4141"),
+            expected = ((module, "d2747463dde7a8556cb2d9bd2f1eb05b89ddfedf3f25ec2afb99ae733b85a747"),
                         (iq, "6613491c0fece80555abceee3948d0389cad588396e83ca25d84786531e1edf0"))
             for path, digest in expected:
                 if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
@@ -54,7 +59,7 @@ def validate_rootfs(image, sensor=None):
                     "sensor_sc438hai_mipi" not in loader or "SENSOR=sc438hai" not in defaults or
                     list(root.rglob("sc438hai_2lane.ko"))):
                 raise ValueError("SC438HAI startup is quarantined or selects an incompatible driver")
-            print("SC438HAI: cold-boot-tested source driver, IQ and startup selection OK")
+            print("SC438HAI: pinned source driver, IQ and startup selection OK (offline)")
 
 
 def assemble(stage, mac, sensor):

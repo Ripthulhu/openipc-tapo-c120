@@ -11,9 +11,9 @@
     "quiesce.sh": "769b2f3d64ef0f03124477ca09361a9c8d7b2eb68ff29adc7a99441638826c1b",
     "openipc-env.bin": "572b171b37f3779494b855a07f998c622ef35e32471c708fff7e3fb9a80ce1ee",
     "u-boot-ssc377-nor.bin": "0bda52f94ca6f935a033e9ba20e684fe11b652c2028277e32a15ffb14abc82f2",
-    "uImage.ssc377": "e7fce4772fdbf26f2b0bba39dea63390ea8be0319c848ed66b8018fe642c95e5",
-    "rootfs.squashfs.ssc377": "4e161eae0102a02f383767b108bd9d4fa7940bf3dcb816cc251f1b4a279c3491",
-    "sc430ai/uImage.ssc377": "0719396c7af5386037d2551825de21f942cfc3980888b8c7c7fd57cf38be1648",
-    "sc430ai/rootfs.squashfs.ssc377": "9663b8f81db8b5086afc603d8a8bef9a281a8d55c18b4cd0175c61dd0f0b0fcb"
+    "uImage.ssc377": "de8e5a3836e83304571ba63b5a389ff6b46b3516b0fcf76af8da048925f46c55",
+    "rootfs.squashfs.ssc377": "3827b26d23d3910fa31e61d6fd3beae4981e8494a8f04e4da4f27a8cdfc853f6",
+    "sc430ai/uImage.ssc377": "d30205fa681e51f8c0c952c653de52363865694f8acc4bd05a04e175a36fa8c4",
+    "sc430ai/rootfs.squashfs.ssc377": "7d37a0492944ce6e59c03b2aa8f2a12309473f9beeb9d504af3ec70d019aefb3"
   }
 }

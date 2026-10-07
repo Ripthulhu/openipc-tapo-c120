@@ -4,6 +4,57 @@ Dated observations and historical image hashes. These do not describe the bytes
 of a freshly rebuilt image or guarantee long-term stability. Current installation
 and source defaults are in [README.md](README.md).
 
+## Upstream Refresh, 2026-10-07
+
+Merged firmware `5650e0297260dc312375de6eef4491d3b0ad1d81` onto fork base
+`02130b6ffaa28f96c555c3688c01e091e5036d50`. This includes the RAM/CMA-aware
+sysupgrade checks and sparse Majestic configuration. C120's first-boot CLI
+writes were checked with a missing config, including the ARM yaml-cli under
+QEMU. CI retains both C120 runtime and upstream build-request coverage; the
+rootfs pruning test fixtures now satisfy the existing startup validator.
+
+Both C120 boards completed full builds. Majestic is `0ea3123` (2026-10-06),
+binary SHA-256 `0d61f1b725ea9b4ce3db217bdacdaeb29509a3c7389ab114c1e32b15c91ea2cd`.
+WebUI is `master+a6c7cf9, 2026-10-06 21:19`, including its ICE restart and
+configuration-reset updates. Packed-image tests enforce matching components
+and the navigation, Live audio and floodlight-list integration points used by
+the optional plugins. This is not a live AI/plugin rollout: cam4 has the base
+firmware, and the other cameras were left untouched.
+
+| Image | Bytes | SHA-256 |
+| --- | ---: | --- |
+| SC438HAI kernel | 2038396 | `de8e5a3836e83304571ba63b5a389ff6b46b3516b0fcf76af8da048925f46c55` |
+| SC438HAI rootfs | 5033984 | `3827b26d23d3910fa31e61d6fd3beae4981e8494a8f04e4da4f27a8cdfc853f6` |
+| SC430AI kernel | 2040308 | `d30205fa681e51f8c0c952c653de52363865694f8acc4bd05a04e175a36fa8c4` |
+| SC430AI rootfs | 5181440 | `7d37a0492944ce6e59c03b2aa8f2a12309473f9beeb9d504af3ec70d019aefb3` |
+
+All fit the 2 MiB kernel / 5 MiB rootfs partitions. Rootfs headroom is 204 KiB
+for SC438HAI and 60 KiB for SC430AI. The public kit manifest is pinned to
+`4cc5cb9186177f55c4b9278464ea6373f81e35974b88fde0b28893849ca85d1f`.
+Images were built from the merged source tree (verification snapshot
+`ac2ef8895f19e0e6b450bbf59f8f72045168d416`) and stamped
+`BUILD_SHA=upstream-5650e029`, not with the eventual merge commit ID.
+
+Only cam4 (`.152`, SC438HAI) was upgraded. Its old kernel/rootfs and private
+configuration/overlay were backed up off-device. Both new flash partitions
+matched the full image hashes above on physical MTD read-back. After the
+upgrade and a second software reboot, each settled RTSP test decoded 899
+H.264 frames over 30 seconds at 2560x1440/30 fps, plus 1501 Opus frames at
+48 kHz. WebRTC and MSE both played at full resolution in the browser.
+Effective configuration, saved YAML and password hash remained unchanged;
+resolution, frame rate, bitrate, exposure and day/night settings were not tuned.
+Available RAM after the second boot was 9516 KiB of 27784 KiB.
+
+The update staged files on SD, bind-mounted below `/tmp`, so sysupgrade's
+RAM-root pivot retained access without copying the images into scarce RAM.
+A plain absolute SD path is not preserved by that pivot; this test did not
+change generic sysupgrade path handling. The existing overlay was preserved;
+no bootloader rewrite, reset, EULA acceptance or password change was performed.
+
+This is bounded linear-mode validation, not a new cold-power test, HDR test,
+physical day/night transition test or stock-to-OpenIPC migration. SC430AI's
+refreshed image was checked offline only; its experimental opt-in remains.
+
 ## Audio Verification, 2026-10-05
 
 Both live cameras received this pin hook and saved speaker configuration on

@@ -174,7 +174,7 @@ UNBUILT_BOARDS = {
 # unknown, and unknown widens. Skipping the matrix for something that does feed
 # the build is the one direction this must never fail in.
 NO_BUILD_WORKFLOWS = {
-    "build-one.yml", "cleanup.yml", "gcc-compat.yml", "image.yml",
+    "build-one.yml", "c120-installer.yml", "cleanup.yml", "gcc-compat.yml", "image.yml",
     "issue-labeler.yml", "lint.yml", "manifest.yml", "qodo-gate.yml",
     "shell-tests.yml", "toolchain-asan.yml", "toolchain.yml", "uboot.yml",
     "vendor-abi.yml",
@@ -195,6 +195,9 @@ NO_BUILD_SCRIPTS = {
     "test_automount.sh", "test_check_mac.sh", "test_excludes_report.sh",
     "test_load_hisilicon.sh", "test_push_build.py", "test_shell_parse.sh",
     "test_strip_shell_comments.sh", "test_sysupgrade.sh",
+    # build-one.yml's request parser and its test: dispatch and shell-tests
+    # only, never part of a board build.
+    "build_request.sh", "test_build_request.sh",
 }
 
 # CI plumbing: it decides how the build runs but cannot change a byte of what

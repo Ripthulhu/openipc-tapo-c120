@@ -31,7 +31,7 @@ FILES = ('busybox', 'libc.so', 'rescue-guard', 'rescue-runtime.tgz', 'mtdw-physi
          'u-boot-ssc377-nor.bin', 'uImage.ssc377', 'rootfs.squashfs.ssc377',
          'sc430ai/uImage.ssc377', 'sc430ai/rootfs.squashfs.ssc377')
 BB = '/bin/busybox '
-MANIFEST_SHA256 = 'bf8039c9e0c6c0f29dfbeb4ef58fa6d7fb2ff37e3b385cb9f5050d62a900b3a6'
+MANIFEST_SHA256 = '4cc5cb9186177f55c4b9278464ea6373f81e35974b88fde0b28893849ca85d1f'
 PROFILES = {
     'sc438hai': {
         'version': '1.4.4 Build 260106 Rel.62350n',
