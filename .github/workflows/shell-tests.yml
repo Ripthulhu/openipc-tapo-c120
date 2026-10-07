@@ -232,7 +232,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc make haserl nodejs python3-numpy python3-venv pkg-config \
-            ffmpeg curl squashfs-tools libcurl4-openssl-dev libjson-c-dev libogg-dev libopus-dev zlib1g-dev
+            ffmpeg curl squashfs-tools libcurl4-openssl-dev libjson-c-dev libogg-dev libopus-dev zlib1g-dev \
+            libmosquitto-dev mosquitto mosquitto-clients
           python3 -m venv --system-site-packages /tmp/c120-tests
           /tmp/c120-tests/bin/pip install -r contrib/tapo-c120/stock-install/requirements.txt
           echo "/tmp/c120-tests/bin" >> "$GITHUB_PATH"

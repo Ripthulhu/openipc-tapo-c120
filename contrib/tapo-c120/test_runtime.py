@@ -58,7 +58,7 @@ def test_payloads():
                     if prefix == 'files':
                         assert archive.extractfile(f'{name}/hostapd-overlay.tgz').read() == (ap / 'hostapd-overlay.tgz').read_bytes()
                     else:
-                        for asset in ('dashboard-luminance.sed', 'dashboard-memory.html', 'floodlight-url.html', 'live-audio.html'):
+                        for asset in ('dashboard-luminance.sed', 'dashboard-memory.html', 'floodlight-url.html', 'live-audio.html', 'live-feed.sed'):
                             assert archive.extractfile(f'{name}/{asset}').read() == (BASE / asset).read_bytes()
                         for asset in ('var/www/a/c120-memory.js', 'var/www/cgi-bin/c120-memory.cgi'):
                             assert archive.extractfile(f'{name}/{prefix}/{asset}').read() == (runtime / asset).read_bytes()
@@ -724,7 +724,16 @@ def test_endpoint_list(root):
     assert 'class="ep-host"' in result and 'class="cp2cb"' in result
     assert 'Toggle white floodlight.' in result
     assert "! grep -q 'c120-floodlight.cgi'" in (BASE / "install-runtime.sh").read_text()
+    original = '<script src="/a/preview.js"></script>\n<script src="/a/preview-webrtc.js"></script>\n'
+    def feed(text):
+        return subprocess.run(['sed', '-f', str(BASE / 'live-feed.sed')],
+            input=text, text=True, capture_output=True, check=True).stdout
+    patched = feed(original)
+    assert patched.count('id="c120-live-feed"') == 1 and 'MJ_FEED = "websocket"' in patched
+    assert patched.index('MJ_FEED') < patched.index('/a/preview.js')
+    assert 'preview-webrtc.js' in patched and feed(patched) == patched
     print("PASS endpoint list: existing URL styling and guarded installer insertion")
+    print("PASS Live feed: native WebSocket MSE, WebRTC retained, early and idempotent insertion")
 
 
 def test_build(root):

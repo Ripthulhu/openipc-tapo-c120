@@ -1,0 +1,54 @@
+# Optional HA package. Do not duplicate an existing UI-created helper.
+input_select:
+  camera_notification_mode:
+    name: Camera notification mode
+    options: [Home, Away]
+    icon: mdi:home-switch
+    # No initial: restore the last mode after a restart.
+automation:
+  - id: openipc_notification_mode_command
+    alias: Camera notification mode from MQTT
+    triggers:
+      - trigger: mqtt
+        topic: openipc/notifications/mode/set
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.payload in ['Home', 'Away'] }}"
+    actions:
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.camera_notification_mode
+        data:
+          option: "{{ trigger.payload }}"
+    mode: queued
+    max: 5
+  - id: openipc_notification_mode_state
+    alias: Camera notification mode to MQTT
+    triggers:
+      - trigger: state
+        entity_id: input_select.camera_notification_mode
+      - trigger: homeassistant
+        event: start
+      - trigger: mqtt
+        topic: homeassistant/status
+        payload: online
+    conditions:
+      - condition: template
+        value_template: "{{ states('input_select.camera_notification_mode') in ['Home', 'Away'] }}"
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: homeassistant/select/openipc_notification_mode/config
+          retain: true
+          payload: >-
+            {"name":"Home/Away","unique_id":"openipc_notification_mode",
+             "default_entity_id":"select.camera_notification_mode","options":["Home","Away"],
+             "command_topic":"openipc/notifications/mode/set","state_topic":"openipc/notifications/mode/state",
+             "retain":false,"qos":0,"icon":"mdi:home-switch",
+             "device":{"identifiers":["openipc_notifications"],"name":"Camera notifications","manufacturer":"OpenIPC"}}
+      - action: mqtt.publish
+        data:
+          topic: openipc/notifications/mode/state
+          retain: true
+          payload: "{{ states('input_select.camera_notification_mode') }}"
+    mode: restart

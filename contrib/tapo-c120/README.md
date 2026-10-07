@@ -22,6 +22,8 @@ needed for normal installation. See the guide for exact supported builds.
 | `ap-recovery-plugin/` | After-flash reset-button Wi-Fi recovery |
 | `runtime-overlay/`, `install-runtime.sh` | Lights, motion/AI floodlight, Live speaker controls |
 | `ai-plugin/` | Optional AI Detection service, API, notifications and recording |
+| `mqtt-plugin/` | Optional MQTT/HA detection, recording/light controls and Home/Away notification integration |
+| `mp3-tools/` | Optional on-demand LAME MP3 encoder; no audio settings or extra daemon |
 | `ai-probe/` | Standalone bring-up diagnostic; not installed on cameras |
 | `check.sh`, `test_*` | Host-only regression checks |
 
@@ -78,18 +80,27 @@ The board profile sets:
 - IR-cut GPIO81 with inverted single-coil polarity
 - camera light leader GPIO12
 - native automatic day/night: 16x gain for night, 2x for day, 15/60-second delays
-- 2560x1440 H.264 at 30 fps, 10000 kbps CBR, GOP 0.5 seconds (15 frames)
+- full-sensor 2688x1520 H.264 at 30 fps, 10000 kbps CBR, GOP 0.5 seconds (15 frames)
 - maximum exposure 33 ms for stable frame delivery
 - 48 kHz mono Opus microphone at level 50; speaker enabled at level 80 on GPIO43
 - JPEG, video1, motion detect, records, and crond disabled by default
 
 These are first-boot defaults, scoped to the C120 board overlay. Installing or
 updating the recovery plugin does not alter video settings. Existing cameras
-retain their settings on upgrade, so also set the resolution/rate explicitly
-when migrating them to QHD. The sensor mode advertises 30 fps; the first-boot
-QHD target is now 30 fps following the [native trial](HISTORY.md#qhd-30-fps-trial-2026-10-04). The exposure
+retain their settings on upgrade, so set `video0.size` explicitly to
+`2688x1520` when migrating them to native output. Both sensor drivers advertise
+this mode at 30 fps. The existing bundled stock-install kits still start at
+2560x1440/30 fps; this source-default change does not replace their pinned images.
+The 30 fps target follows the [native trial](HISTORY.md#qhd-30-fps-trial-2026-10-04). The exposure
 cap can reduce low-light brightness; raising it may reduce the actual frame
 rate.
+
+The sensor and scaler on the four deployed cameras already read the full
+2688x1520 area with no explicit crop. The earlier 2560x1440 main stream was
+scaled down, not a narrower field of view. Native output preserves those
+additional pixels; it does not expose a wider scene. Keep optional motion
+visualization off at this resolution and verify available media memory with
+AI, snapshots and recording enabled before adding more encoder channels.
 
 The current upstream Majestic handles QHD natively through its Ring SCL-to-VENC
 binding. The old `c120-qhd` package and preload hook have been removed. On an
@@ -168,6 +179,11 @@ For microphone streaming, use `/audio.opus`. The tested Majestic build can
 crash on `/audio.pcm` even with AI stopped; this is independent of speaker
 PCM uploads to `/play_audio`. See the [AI plugin status](ai-plugin/README.md#status).
 
+The optional [MP3 tools](mp3-tools/README.md) add an on-demand encoder for files
+on SD, without migrating flash partitions or installing unused Ultimate
+services. They do not enable MP3 capture in Lite Majestic; Opus streaming,
+two-way talk and recording retain their existing settings.
+
 ## Remote Live Viewing
 
 The native Live page offers WebRTC and MSE. WebRTC signaling uses the reverse
@@ -180,7 +196,11 @@ If WebRTC stays at connecting, select **MSE** in the Live controls. The preferen
 is saved per browser and camera origin, not in the camera's firmware settings.
 MSE uses `/ws/video` through the same HTTPS proxy and does not lower resolution,
 frame rate or bitrate. Listening remains available; Talk requires WebRTC.
-Native MSE can first try a data channel before falling back to WebSocket.
+The runtime installer selects native WebSocket transport for MSE instead of
+first trying a WebRTC data channel. It uses the existing `MJ_FEED` preference;
+WebRTC and its Talk control remain available. A bounded cam3 trial reduced
+sustained CPU load with Live and Dashboard open; see
+[the measurements and recording limitations](HISTORY.md#cam3-recording-and-live-load-2026-10-08).
 
 A controlled failed-negotiation test took about 33 seconds to reach automatic
 WebSocket fallback. Separate proxy tests played at 2560x1440 / 30 fps. These are

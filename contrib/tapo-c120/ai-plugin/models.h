@@ -1,10 +1,11 @@
 #ifndef C120_MODELS_H
 #define C120_MODELS_H
 #include <json-c/json.h>
+#include "bird.h"
 struct detector_model {
     char id[49], name[81], sha256[65];
     unsigned bytes;
-    int bird, fd;
+    int bird, fd; /* 0=stock; otherwise enum bird_decoder. */
     double confidence, nms;
 };
 int model_id_valid(const char *id);

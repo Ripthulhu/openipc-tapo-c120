@@ -80,6 +80,15 @@ client interruption. The client stops on 410; it never silently discards a curso
 
 ## AI Summaries and Stills
 
+The AI settings API also accepts a CSRF-authenticated POST containing only
+`csrf` and `recordClipSeconds` (integer 1-600). It returns **202** after requesting
+a clip; setup AP/stopped services return 503 and an outstanding request returns
+409. Automatic recording settings are unchanged. A request still needs writable
+storage, a healthy MP4 stream and native recording disabled. Monitor status and
+completion. New manually started clips have source `manual`, with no invented
+classification. Retriggering extends an active clip. The optional
+[MQTT plugin](../mqtt-plugin/README.md) exposes the same operation as an HA button.
+
 New AI clips aggregate accepted detections over the clip: category, type,
 active model ID, maximum confidence, and first/last seen timestamps. Visual
 detections already passed the configured motion-region policy. The selected

@@ -4,6 +4,190 @@ Dated observations and historical image hashes. These do not describe the bytes
 of a freshly rebuilt image or guarantee long-term stability. Current installation
 and source defaults are in [README.md](README.md).
 
+## Fleet Software Alignment, 2026-10-08
+
+All four cameras now use the tested Majestic `master+d8a0721` binary and
+AI helper `df826cf2cdf6092845814ee7140c32567386d7550449ce44ffa39c4be686cf73`
+described below. Their static Web UI files were aligned with the verified
+`master+a6c7cf9` UI plus our runtime extensions, including WebSocket MSE
+and raw SDK luminance. Cam4 had been missing the luminance correction;
+its readings are no longer presented as an 8-bit value out of 255.
+
+The base remains the October 7 firmware with SC430AI components on cam1/2
+and SC438HAI components on cam3/4. Sensor binaries and individual settings
+are intentionally not interchangeable. Existing video, AI actions, MQTT and
+Wi-Fi configuration were preserved, with no camera reboot or partition writes.
+Cam4 also received the previously missing Lights/AP-recovery and MQTT
+plugins; automatic floodlighting and MQTT remain disabled there by default.
+The host suite passed against the exact first-commit source, independently
+of the subsequent optimization work. This alignment does not resolve the
+concurrent-recording limitation documented below.
+
+## Cam3 Recording and Live Load, 2026-10-08
+
+Cam3's native-resolution freeze was reproduced by reading `/video.mp4` with
+AI running, even when discarding the stream without writing to SD. HTTP
+configuration requests then timed out while the OS remained reachable.
+The collected logs do not establish an OOM kill or kernel crash.
+
+Only cam3 received upstream Majestic `master+d8a0721` (2026-10-07 17:31),
+SHA256 `6ab7e4ff8e9d077f3f46fd7a81d28e2a4f08caefc1ba5e8267dc97712a94d788`.
+The updated AI helper bounds periodic configuration waits at 50 ms, retaining
+the last verified settings for at most ten seconds only on a timeout with
+the same active camera owner. Twenty-four host cases cover post-load retries
+and runtime timeout, invalid-response, shutdown and ownership guards. The
+full `check.sh` suite passed. Final deployed helper SHA256:
+`df826cf2cdf6092845814ee7140c32567386d7550449ce44ffa39c4be686cf73`.
+
+The Live runtime add-on now uses upstream's `MJ_FEED = "websocket"` for MSE;
+WebRTC remains available for Talk. Two bounded 80-second measurements,
+excluding the first 15 seconds, showed camera CPU averaging 70.5% with the
+previous MSE data-channel feed and 53.8% with WebSocket. Majestic's main
+thread fell from 29.5% to 7.3%. Live stayed open in both trials; Dashboard
+was paused for much of the first and open throughout the second. These
+are sustained-load observations, not identical-workload peak benchmarks.
+
+Recording remains unresolved under concurrent viewing. One earlier saved
+clip decoded only 330 video frames over 12.77 seconds despite a 15-second
+request. The final trial with Live and Dashboard open produced an HTTP
+timeout and a stalled retry, with no completed clip published. Majestic
+reported 2524 KiB free memory below its 3467 KiB floor and shed the MP4
+client. Video and both detectors recovered without a camera reboot or
+Majestic/AI/MQTT daemon restart. This is recovery evidence, not proof of
+reliable or lossless native-resolution recording.
+
+Live video stayed at 2688x1520, 30 fps, 6000 kbit/s CBR and GOP 0.5 seconds.
+Motion detection, saved AI actions and notification settings were preserved.
+The final stream buffer is 512 KiB; experimental VM dirty limits were
+restored to their original values. No other camera was updated in this trial.
+
+## Native Resolution and MP3 Tools, 2026-10-07
+
+Both SC430AI and SC438HAI drivers expose 2688x1520 at 30 fps. All four cameras
+now encode that native size, retaining their live 6000 kbit/s CBR, 0.5-second
+GOP and other Majestic/AI settings. The previous QHD output was scaled from
+the full sensor, not an explicit crop; this adds output pixels, not field of
+view. New first-boot defaults use the native size. The previously published
+stock installer kit remains pinned to its earlier QHD images.
+
+Independent 30-second RTSP checks decoded 857-898 H.264 frames and matching
+Opus audio without errors on each camera. Cam1's later reboot was confirmed
+as a manual power cycle, and its repeat stream check passed. Cam2's HTTP
+configuration endpoint stalled after its initial MP3 test, services restarted,
+and the camera rebooted unexpectedly around 22:56 local. Neither the owner
+nor the coordinated bird-model chat caused that reboot. Available post-boot
+logs do not establish its cause; it must not be attributed to MP3 encoding
+or declared fixed without further evidence. Cam2 recovered, retained its
+settings and passed the repeat MP3 and stream checks.
+
+The optional [MP3 tools package](mp3-tools/README.md) installs Buildroot's
+LAME 3.100 frontend and shared library on all four cameras, without a startup
+service, firmware flash or partition change. A synthetic one-second mono
+48 kHz tone encoded at 64 kbit/s on each camera and independently decoded
+to 48,000 samples with the expected level. Settings and running process IDs
+were unchanged in successful install checks. It adds neither `/audio.mp3`
+capture nor MP3 input to `/play_audio`; playback still needs PCM or Ogg Opus.
+
+After recovery, a low-overhead 60-second check preserved every boot ID and
+Majestic/AI/MQTT process ID. Cam1-3 each processed 117 visual frames and
+249-250 sound frames, with at least 4880 KiB Linux and 4066 KiB media memory
+free across those cameras. Cam4's detectors remained deliberately disabled.
+These are bounded checks, not a long-term stability or simultaneous
+recording/recognition guarantee at the new resolution.
+
+## One-Class Bird Models, 2026-10-07
+
+Cam4 (.152) qualified one-class 320 and 384 bird models with the combined
+analysis-port lifecycle fix and bounded post-load HTTP-timeout retries. Live
+model switching passed with normal HTTP status polling; inference took
+28-32 ms and 42-51 ms respectively at a 500 ms interval. During the 384 trial,
+30-second RTSP decoding returned 893 QHD H.264 frames plus 1501 Opus frames
+with no decoder errors. Scene recognition accuracy was not measured.
+
+The runtime rejected the larger COCO model at the queried tensor/feed memory
+guard. Its bytes remain in SD reference storage outside the selectable library.
+Cam4's exact original configuration was restored: Stock selected, visual and
+sound detection disabled, no automatic actions enabled, unchanged video quality.
+Final free media memory returned to 10,527 KiB. Native combined helper hash:
+`5b3363be1089c17db4498ef9ed6693be5587ad16a3b2720bba17c712a5adabbd`.
+These are bounded hardware checks, not a long-term stability or accuracy claim.
+
+The tested decoder/profile/memory/retry changes are integrated into shared
+source for future builds. They were not deployed to cam1, cam2 or cam3, and
+neither experimental model becomes a fresh-install default.
+
+## AI Analysis Port Recovery, 2026-10-07
+
+Cam3 (.101) stopped both detectors with "analysis port is in use". Its old
+helper had forgotten ownership of an enabled, unbound SCL output 2, although
+the saved 800x448 settings and Majestic PID still matched the live port.
+The "invalid motion regions" status was also misleading: the saved region
+list was empty and valid. The exact initial failed ownership query was not
+captured, so the observations do not prove whether it was a driver error or
+an incomplete proc dump.
+
+Ownership now distinguishes unknown from known-other. Unknown queries and
+failed cleanup retain the claim for retry; proc reports must contain complete
+binding and output sections. A visual-port conflict no longer blocks sound
+startup. Successful camera validation clears the stale region warning.
+An orderly Majestic restart cleared the existing orphan; only the AI helper
+was replaced, with all saved settings and QHD/30/6000 video preserved.
+
+Host regressions passed. On-device detector enable/disable combinations
+worked. Repeated CGI polling caused temporary configuration timeouts during
+the strict soak; both detectors recovered automatically without a service
+restart or another orphan. A separate low-overhead 60-second status check
+completed uninterrupted, with 115 visual and 246 sound frames, at least
+4672 KiB Linux and 5193 KiB media memory free. The final cam3 helper hash is
+`4c6eef5085b802f4f29f9c5c321ca788d589749e8fcc601ca7191532d15e0fa9`.
+This verifies bounded recovery, not the absence of all HTTP-load pauses or
+long-term faults.
+
+## MQTT, SD and Overlay Cleanup, 2026-10-07
+
+The optional [MQTT plugin](mqtt-plugin/README.md) is deployed on cam1 (.126),
+cam2 (.196) and cam3 (.101). Each publishes 27 Home Assistant entities through
+a dedicated broker account restricted to its own topics. Real HA setting
+commands, discovery, reconnect state and negative cross-camera ACL checks
+passed. Commands never alter video resolution, FPS or bitrate; retained
+commands are rejected. Completion events are best-effort, so the durable
+recordings API remains the way to catch up after disconnection.
+
+Home/Away is a persistent HA notification mode. Cam1 and cam2 phone alerts
+require Away; cam3 deliberately notifies in both modes. Detection, recording
+and light actions continue in Home. The existing notification filters,
+cooldowns and still attachments were preserved. Cam3 retains automatic
+person/pet recording; cam1 and cam2 automatic recording remain disabled.
+
+Cam1's replacement 32 GB card was explicitly formatted FAT32 with 32 KiB
+clusters after an old FAT error had remounted it read-only. Filesystem checking,
+writes and plugin-package restoration passed. HA's Record Clip button reached
+the native recorder and produced a catalogued H.264 2560x1440/Opus clip plus an
+MQTT/HA completion event. The final 30-second request contained 29.800 seconds
+of parseable media, 855 video packets and matching audio. This is not a promise
+of lossless capture under every simultaneous viewing/analysis load: an earlier
+request contained only 20.3 seconds despite a 30-second wall-clock timer.
+GOP remains 0.5 seconds; cam1's live buffer is 512 KiB. QHD/30 and 6000 kbit/s
+were preserved. Recording errors now distinguish storage/stream failures and
+refuse a read-only filesystem before creating a clip.
+
+Private complete overlay backups preceded cam1/cam2 cleanup. Stale historical
+backups and verified redundant upper files were removed. The old October 4
+Majestic override (`663debf3...`) was masking the newer October 6 version
+already in their verified zram firmware (`0d61f1b7...`). Its matching core
+library set was tested with reversible bind mounts before retiring the old
+overrides and rebooting. Thirty-second QHD H.264/Opus checks passed, and
+persistent settings, AI models/helpers, MQTT and memory-dashboard files stayed
+intact. Cam1 free overlay space rose from 1080 to 4236 KiB (88% to 52% used);
+cam2 from 1368 to 4280 KiB (85% to 52%). No kernel, rootfs or bootloader flash
+write was needed. Future upgrades should check for stale core overrides rather
+than assuming an updated immutable image is the active runtime.
+
+The full C120 regression suite passed, including MQTT broker/command tests,
+read-only/error handling, retention, recording catalogue and memory dashboard.
+Long-term recording stability and a fresh physical motion/talkback check on
+both older sensors remain separate from these stream/configuration checks.
+
 ## HTTP MP4 Stall, 2026-10-07
 
 Cam4 (.152), Majestic `0ea3123`: the HTTP MP4 path drops video when a GOP

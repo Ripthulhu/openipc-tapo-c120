@@ -47,6 +47,13 @@ if [ -f "$URLS" ] && ! grep -q 'c120-floodlight.cgi' "$URLS"; then
 	mv "$URLS.new" "$URLS"
 fi
 LIVE=/var/www/cgi-bin/live.cgi
+if [ -f "$LIVE" ]; then
+	grep -q '<script src="/a/preview.js"></script>' "$LIVE" || { echo "Unsupported live feed" >&2; exit 1; }
+	cp -p "$LIVE" "$BACKUP/live-feed.cgi"
+	sed -f "$BASE/live-feed.sed" "$LIVE" > "$LIVE.new"
+	chmod 755 "$LIVE.new"
+	mv "$LIVE.new" "$LIVE"
+fi
 if [ -f "$LIVE" ] && ! grep -q 'c120-live-audio.js' "$LIVE"; then
 	grep -q '<script src="/a/preview-health.js"></script>' "$LIVE" || { echo "Unsupported live player" >&2; exit 1; }
 	cp -p "$LIVE" "$BACKUP/live.cgi"

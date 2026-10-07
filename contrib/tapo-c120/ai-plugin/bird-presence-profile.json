@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "bird-presence-v1",
+  "name": "Bird presence - YOLOv5n (experimental)",
+  "target": "ssc377-ipu-v6",
+  "decoder": "yolov5n-bird-presence-v1",
+  "modelBytes": 4205568,
+  "sha256": "050e61a8b61e6f7beb565f18d741eae11df193e6a91b5f64964c4c4bdbddb4dc",
+  "confidence": 0.70,
+  "nms": 0.45
+}

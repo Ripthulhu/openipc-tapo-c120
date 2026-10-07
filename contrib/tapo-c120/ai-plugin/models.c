@@ -50,7 +50,7 @@ int model_profile(J *o,struct detector_model *m)
         !json_object_is_type(field(o,"version"),json_type_int) || json_object_get_int(field(o,"version"))!=1 ||
         !plain(o,"id",48) || !model_id_valid(string(o,"id")) || !strcmp(string(o,"id"),"stock") ||
         !plain(o,"name",80) || !plain(o,"target",32) || strcmp(string(o,"target"),"ssc377-ipu-v6") ||
-        !plain(o,"decoder",40) || strcmp(string(o,"decoder"),"yolov5n-coco-bird-v1") ||
+        !plain(o,"decoder",40) || (strcmp(string(o,"decoder"),"yolov5n-coco-bird-v1") && strcmp(string(o,"decoder"),"yolov5n-bird-presence-v1") && strcmp(string(o,"decoder"),"yolov5n-bird-presence-384-v1")) ||
         !plain(o,"sha256",64) || strlen(string(o,"sha256"))!=64 ||
         !json_object_is_type(field(o,"modelBytes"),json_type_int) ||
         json_object_get_int64(field(o,"modelBytes"))<1024 || json_object_get_int64(field(o,"modelBytes"))>MODEL_LIMIT) return 0;
@@ -62,7 +62,9 @@ int model_profile(J *o,struct detector_model *m)
         if ((!json_object_is_type(v,json_type_double) && !json_object_is_type(v,json_type_int)) ||
             !isfinite(n) || n<(i?.05:.25) || n>(i?.95:.99)) return 0;
     }
-    memset(m,0,sizeof(*m)); m->fd=-1; m->bird=1;
+    memset(m,0,sizeof(*m)); m->fd=-1;
+    m->bird=!strcmp(string(o,"decoder"),"yolov5n-coco-bird-v1")?BIRD_COCO:
+        !strcmp(string(o,"decoder"),"yolov5n-bird-presence-v1")?BIRD_PRESENCE:BIRD_PRESENCE_384;
     snprintf(m->id,sizeof(m->id),"%s",string(o,"id")); snprintf(m->name,sizeof(m->name),"%s",string(o,"name"));
     snprintf(m->sha256,sizeof(m->sha256),"%s",hash); m->bytes=json_object_get_int(field(o,"modelBytes"));
     m->confidence=json_object_get_double(field(o,"confidence")); m->nms=json_object_get_double(field(o,"nms"));

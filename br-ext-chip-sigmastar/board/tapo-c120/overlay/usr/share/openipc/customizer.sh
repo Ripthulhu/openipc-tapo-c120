@@ -31,7 +31,7 @@ cli -s .nightMode.monitorDelay 0
 
 cli -s .video0.enabled true
 cli -s .video0.codec h264
-cli -s .video0.size 2560x1440
+cli -s .video0.size 2688x1520
 cli -s .video0.fps 30
 cli -s .video0.bitrate 10000
 cli -s .video0.rcMode cbr

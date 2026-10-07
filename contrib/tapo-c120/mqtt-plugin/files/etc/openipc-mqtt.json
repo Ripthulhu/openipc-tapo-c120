@@ -1,0 +1,10 @@
+{
+  "enabled": false,
+  "host": "192.168.1.1",
+  "port": 1883,
+  "id": "replace_with_camera_mac_without_colons",
+  "name": "Camera",
+  "username": "",
+  "password": "",
+  "url": ""
+}

@@ -20,7 +20,7 @@ static int16_t quantize(float value,const struct bird_tensor *t)
 }
 int bird_quantize(const float *rgb,unsigned pixels,const struct bird_tensor *t,int16_t *dest)
 {
-    if (!rgb || !dest || pixels>320*320 || !isfinite(t->scale) || t->scale<=0 || t->stride<6 || t->stride>16 || t->stride%2 || t->bytes<pixels*t->stride) return -1;
+    if (!rgb || !dest || (t->width!=320 && t->width!=384) || t->height!=t->width || pixels>t->width*t->height || !isfinite(t->scale) || t->scale<=0 || t->stride<6 || t->stride>16 || t->stride%2 || t->bytes<pixels*t->stride) return -1;
     memset(dest,0,t->bytes);
     for (unsigned i=0;i<pixels;++i) for (int c=0;c<3;++c) {
         if (!isfinite(rgb[i*3+c])) return -1;
@@ -57,19 +57,20 @@ static int weights(struct weights *w,unsigned source,unsigned target)
 }
 int bird_prepare(const struct bird_image *im,const struct bird_tensor *t,int16_t *dest)
 {
-    if (!im || !dest || !im->width || !im->height || im->width>1600 || im->height>900 || t->width!=320 || t->height!=320 || t->channels!=3 ||
-        t->stride<6 || t->stride>16 || t->stride%2 || t->bytes<320*320*t->stride || !isfinite(t->scale) || t->scale<=0 ||
+    if (!im || !dest || !im->width || !im->height || im->width>1600 || im->height>900 || (t->width!=320 && t->width!=384) || t->height!=t->width || t->channels!=3 ||
+        t->stride<6 || t->stride>16 || t->stride%2 || t->bytes<t->width*t->height*t->stride || !isfinite(t->scale) || t->scale<=0 ||
         (im->rgb?im->rgb_stride<im->width*3:!im->y || !im->uv || im->width%2 || im->height%2 || im->y_stride<im->width || im->uv_stride<im->width)) return -1;
-    double gain=fmin(320.0/im->width,320.0/im->height);
+    unsigned size=t->width;
+    double gain=fmin((double)size/im->width,(double)size/im->height);
     unsigned w=(unsigned)nearbyint(im->width*gain),h=(unsigned)nearbyint(im->height*gain);
     if (!w || !h) return -1;
-    unsigned left=(unsigned)nearbyint((320-w)/2.0-.1),top=(unsigned)nearbyint((320-h)/2.0-.1);
+    unsigned left=(unsigned)nearbyint((size-w)/2.0-.1),top=(unsigned)nearbyint((size-h)/2.0-.1);
     struct weights *wx=calloc(w,sizeof(*wx)),*wy=calloc(h,sizeof(*wy));
     unsigned char *horizontal=malloc(w*im->height*3);
     if (!wx || !wy || !horizontal || weights(wx,im->width,w) || weights(wy,im->height,h)) { free(wx); free(wy); free(horizontal); return -1; }
     memset(dest,0,t->bytes);
     int16_t pad=quantize(114/255.0f,t); unsigned pitch=t->stride/2;
-    for (unsigned i=0;i<320*320;++i) for (int c=0;c<3;++c) dest[i*pitch+c]=pad;
+    for (unsigned i=0;i<size*size;++i) for (int c=0;c<3;++c) dest[i*pitch+c]=pad;
     /* Separable antialiased bilinear resize; round each 8-bit pass like the photo baseline. */
     for (unsigned y=0;y<im->height;++y) for (unsigned x=0;x<w;++x) {
         int32_t sum[3]={1<<21,1<<21,1<<21};
@@ -78,7 +79,7 @@ int bird_prepare(const struct bird_image *im,const struct bird_tensor *t,int16_t
     }
     for (unsigned y=0;y<h;++y) for (unsigned x=0;x<w;++x) for (int c=0;c<3;++c) {
         int32_t sum=1<<21; for (unsigned k=0;k<wy[y].count;++k) sum+=horizontal[((wy[y].first+k)*w+x)*3+c]*wy[y].values[k];
-        dest[((y+top)*320+x+left)*pitch+c]=quantize(clip(sum>>22)/255.0f,t);
+        dest[((y+top)*size+x+left)*pitch+c]=quantize(clip(sum>>22)/255.0f,t);
     }
     free(wx); free(wy); free(horizontal); return 0;
 }
@@ -95,21 +96,24 @@ static float iou(const struct bird_box *a,const struct bird_box *b)
     float area=(a->x2-a->x1)*(a->y2-a->y1)+(b->x2-b->x1)*(b->y2-b->y1)-intersection;
     return area>0?intersection/area:0;
 }
-int bird_decode(const struct bird_tensor heads[3],const int16_t *data[3],float confidence,float nms,unsigned width,unsigned height,struct bird_box boxes[300])
+int bird_decode(const struct bird_tensor heads[3],const int16_t *data[3],int decoder,float confidence,float nms,unsigned width,unsigned height,struct bird_box boxes[300])
 {
     static const float anchors[3][3][2]={{{10,13},{16,30},{33,23}},{{30,61},{62,45},{59,119}},{{116,90},{156,198},{373,326}}};
-    if (!width || !height || !isfinite(confidence) || confidence<.25 || confidence>.99 || !isfinite(nms) || nms<.05 || nms>.95) return -1;
-    struct bird_box *candidates=malloc(6300*sizeof(*candidates)); if (!candidates) return -1;
+    if ((decoder!=BIRD_COCO && decoder!=BIRD_PRESENCE && decoder!=BIRD_PRESENCE_384) || !width || !height || !isfinite(confidence) || confidence<.25 || confidence>.99 || !isfinite(nms) || nms<.05 || nms>.95) return -1;
+    unsigned classes=decoder==BIRD_COCO?80:1,bird_class=decoder==BIRD_COCO?14:0,values=classes+5;
+    unsigned input_size=decoder==BIRD_PRESENCE_384?384:320,grid=input_size/8;
+    unsigned capacity=3*(grid*grid+(grid/2)*(grid/2)+(grid/4)*(grid/4));
+    struct bird_box *candidates=malloc(capacity*sizeof(*candidates)); if (!candidates) return -1;
     unsigned count=0,base=0;
     for (unsigned head=0;head<3;++head) {
-        const struct bird_tensor *t=&heads[head]; unsigned size=40>>head,stride=8<<head;
-        if (!data[head] || t->width!=size || t->height!=size || t->channels!=255 || t->stride<510 || t->stride%2 || t->bytes<size*size*t->stride || !isfinite(t->scale) || t->scale<=0) { free(candidates); return -1; }
+        const struct bird_tensor *t=&heads[head]; unsigned size=grid>>head,stride=8<<head;
+        if (!data[head] || t->width!=size || t->height!=size || t->channels!=3*values || t->stride<6*values || t->stride%2 || t->bytes<size*size*t->stride || !isfinite(t->scale) || t->scale<=0) { free(candidates); return -1; }
         for (unsigned a=0;a<3;++a) for (unsigned y=0;y<size;++y) for (unsigned x=0;x<size;++x) {
-            const int16_t *p=data[head]+(y*size+x)*(t->stride/2)+a*85;
+            const int16_t *p=data[head]+(y*size+x)*(t->stride/2)+a*values;
             float objectness=sigmoid(value(p,4,t)); if (objectness<=confidence) continue;
-            unsigned best=0; for (unsigned c=1;c<80;++c) if (p[5+c]>p[5+best]) best=c;
-            if (best!=14) continue;
-            float score=objectness*sigmoid(value(p,19,t)); if (score<=confidence) continue;
+            unsigned best=0; for (unsigned c=1;c<classes;++c) if (p[5+c]>p[5+best]) best=c;
+            if (best!=bird_class) continue;
+            float score=objectness*sigmoid(value(p,5+bird_class,t)); if (score<=confidence) continue;
             float cx=(sigmoid(value(p,0,t))*2-.5f+x)*stride,cy=(sigmoid(value(p,1,t))*2-.5f+y)*stride;
             float w=powf(sigmoid(value(p,2,t))*2,2)*anchors[head][a][0],h=powf(sigmoid(value(p,3,t))*2,2)*anchors[head][a][1];
             candidates[count++]=(struct bird_box){cx-w/2,cy-h/2,cx+w/2,cy+h/2,score,base+a*size*size+y*size+x};
@@ -121,8 +125,8 @@ int bird_decode(const struct bird_tensor heads[3],const int16_t *data[3],float c
         int suppress=0; for (unsigned j=0;j<kept;++j) if (iou(&candidates[i],&boxes[j])>nms) { suppress=1; break; }
         if (!suppress) boxes[kept++]=candidates[i];
     }
-    float gain=fminf(320.0f/width,320.0f/height);
-    float px=(320-nearbyintf(width*gain))/2,py=(320-nearbyintf(height*gain))/2;
+    float gain=fminf((float)input_size/width,(float)input_size/height);
+    float px=(input_size-nearbyintf(width*gain))/2,py=(input_size-nearbyintf(height*gain))/2;
     for (unsigned i=0;i<kept;++i) {
         struct bird_box *b=&boxes[i];
         b->x1=fminf(width,fmaxf(0,(b->x1-px)/gain))/width; b->x2=fminf(width,fmaxf(0,(b->x2-px)/gain))/width;

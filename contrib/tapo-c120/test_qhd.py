@@ -1,4 +1,4 @@
-"""Linux checks for native C120 QHD defaults and the firmware lifecycle."""
+"""Linux checks for native C120 full-sensor defaults and the firmware lifecycle."""
 import os
 from pathlib import Path
 import subprocess
@@ -18,7 +18,7 @@ def test_defaults(root):
     result = subprocess.run(["sh", "-c", 'cli() { echo "$*"; }; fw_setenv() { :; };\n' +
                              customizer.read_text().split("# The stock crontab")[0]],
                             check=True, capture_output=True, text=True)
-    for setting in (".video0.size 2560x1440", ".video0.fps 30", ".video0.bitrate 10000",
+    for setting in (".video0.size 2688x1520", ".video0.fps 30", ".video0.bitrate 10000",
                     ".video0.gopSize 0.5", ".isp.exposure 33", ".motionDetect.visualize false",
                     ".nightMode.lightMonitor true", ".nightMode.colorToGray true",
                     ".nightMode.autoNightGain 16",
@@ -39,9 +39,14 @@ def test_defaults(root):
     assert "BR2_TARGET_ROOTFS_SQUASHFS_EXTREME_COMP=y" in config.read_text()
     assert not (REPO / "general/package/c120-qhd/Config.in").exists()
     settings = dict(line[3:].split(" ", 1) for line in result.stdout.splitlines() if line.startswith("-s "))
+    for sensor in ("sc430ai", "sc438hai"):
+        source = (REPO / f"sigmastar/infinity6c/sensor_{sensor}_mipi.c").read_text()
+        assert "#define Preview_WIDTH 2688" in source
+        assert "#define Preview_HEIGHT 1520" in source
+        assert '"2688x1520@30fps"' in source
     # Leave burst headroom below the HTTP MP4 muxer's fixed 1 MiB GOP cap.
     assert float(settings['.video0.gopSize']) * int(settings['.video0.bitrate']) * 1000 / 8 < 768 * 1024
-    print("PASS C120 defaults: native Majestic, 1440p/30fps, MP4-safe GOP, automatic day/night, no preload hook")
+    print("PASS C120 defaults: both sensors at 2688x1520/30fps, MP4-safe GOP, automatic day/night, no preload hook")
 
 
 def test_pruning(root):

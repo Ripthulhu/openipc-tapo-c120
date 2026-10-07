@@ -67,6 +67,17 @@ inside at least one configured Majestic motion region. An empty list means the
 whole image. Invalid regions pause AI rather than broadening the watched area.
 
 The daemon is low priority and owns only an otherwise unused SCL output port 2.
+An incomplete scaler dump or failed settings query leaves ownership unknown,
+not lost: cleanup retains its claim and retries before releasing the IPU device.
+It never disables a bound port or one whose owner/settings have changed.
+Periodic camera-configuration checks have a 50 ms deadline so they do not
+block draining the audio and recording streams. Only an HTTP timeout can
+reuse a validated configuration for at most ten seconds, while the same
+Majestic process and initialized device remain active. Explicit invalid
+settings, malformed replies, HTTP errors, shutdown and AP mode do not use
+this grace period. The normal memory and analysis-port ownership guards
+still apply. This improves recovery under load; it does not guarantee
+simultaneous recording, recognition and browser viewing at native resolution.
 It pauses and releases the model/feed when the substream is enabled, memory is
 low, Majestic is unavailable, or setup AP mode is active. The AP recovery hook
 stops it before Majestic and restores the service afterward. No SDK libraries are
@@ -78,7 +89,9 @@ Media memory and Linux memory are separate pools; RSS alone omits most AI memory
 The compressed model is read from flash directly, never unpacked into `/tmp`.
 
 Sound recognition uses a second channel on the same IPU device, not another
-process. It consumes Majestic's local `/audio.opus` stream with libcurl over
+process. A visual analysis-port conflict does not prevent that sound channel
+from starting; shared camera/readiness and memory guards still apply.
+It consumes Majestic's local `/audio.opus` stream with libcurl over
 HTTP/1.0. The firmware's libogg and libopus decode an analysis-only copy to
 48 kHz mono; SpeexDSP resamples it to 16 kHz, then the stock frontend decimates
 to 8 kHz. The user's microphone sample rate, codec and gain are not changed.
@@ -265,6 +278,23 @@ directories onto the card yourself. IDs are immutable: use a new ID for a new
 revision. The library allows 16 compatible models, each at most 8 MiB; uploads
 reserve another 1 MiB of free storage. Incomplete uploads can be cancelled.
 The selected, active and rollback models cannot be removed through the API.
+
+The tested one-class bird profiles are
+[320x320](bird-presence-profile.json) and
+[384x384](bird-presence-384-profile.json). Both use RGB NHWC S16 input and three
+raw heads with 18 logical channels (three anchors times six values). Their fixed
+decoder contracts are `yolov5n-bird-presence-v1` and
+`yolov5n-bird-presence-384-v1`; profiles default to confidence 0.70 and NMS 0.45.
+Bird replaces person/pet/vehicle analysis, not an additional resident model.
+Stock remains the default. The model images must be supplied separately on SD;
+profiles alone are not executable models. Camera recognition accuracy remains
+unmeasured, despite successful loading/inference and offline decoding checks.
+
+Media admission uses the queried tensor sizes after channel creation, preserving
+space for the feed and a safety reserve. Post-load configuration reads retry
+only HTTP timeouts, at most three 2.5-second attempts with 0.2-second gaps;
+invalid regions, an enabled substream, camera ownership changes, setup AP and
+shutdown still reject the load. This is not a general retry for invalid models.
 
 Upload chunks are written directly to the card, at most 3072 decoded bytes per
 request. Length and SHA-256 are checked before an atomic directory rename. Paths,

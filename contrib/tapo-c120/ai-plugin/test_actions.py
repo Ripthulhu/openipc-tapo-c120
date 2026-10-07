@@ -203,6 +203,7 @@ def main():
         end=time.monotonic()+2
         while time.monotonic()<end: lib.record_poll(); time.sleep(.01)
         assert state('record_state')['clips']==0 and state('record_state')['errors']==1
+        assert state('record_state')['lastError']=='Recording stream interrupted'
         assert not list((root/'failed-clips').glob('*')), 'failed stream published video or left an orphan still'
         lib.record_stop()
     server.shutdown(); server.server_close()

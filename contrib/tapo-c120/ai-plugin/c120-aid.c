@@ -37,9 +37,14 @@
 #define MODEL_BYTES 4501504U
 #define SOUND_MODEL "/usr/lib/c120-ai/sound.img.gz"
 #define SOUND_BYTES 480640U
+#define VISUAL_SCRATCH_BYTES 1687552U
+#define VISUAL_RESERVE_BYTES (1080000U+512U*1024U)
 #define SCL_PROC "/proc/mi_modules/mi_scl/mi_scl0"
 #define LIGHT_SIGNAL "/run/c120-ai-light.signal"
 #define RECORD_REQUEST "/run/c120-recording-request.json"
+#ifndef C120_CONFIG_URL
+#define C120_CONFIG_URL "http://127.0.0.1/api/v1/config.json"
+#endif
 
 typedef struct json_object J;
 static volatile sig_atomic_t stopping, reloading, testing_notification, triggering_record;
@@ -64,6 +69,14 @@ static struct bird_tensor bird_input, bird_heads[3];
 static double visual_warmup;
 static int missing_model;
 static unsigned mma_kb(void);
+static unsigned startup_media_kb(int visual,int sound)
+{
+    if (!visual) return 2048;
+    /* Weights and queried tensor bytes are admitted separately in visual_start. */
+    unsigned needed=VISUAL_SCRATCH_BYTES+VISUAL_RESERVE_BYTES;
+    if (sound) needed+=SOUND_BYTES+SOUND_VALUES*2+64;
+    return (needed+1023)/1024;
+}
 
 static double now(void)
 {
@@ -406,12 +419,15 @@ static size_t receive(char *p, size_t size, size_t count, void *user)
     return n;
 }
 
+static int pipeline_timeout;
+static double pipeline_verified;
 static int pipeline(long timeout_ms)
 {
+    pipeline_timeout = 0;
     struct body b = {0};
     CURL *c = curl_easy_init();
     if (!c) return 0;
-    curl_easy_setopt(c, CURLOPT_URL, "http://127.0.0.1/api/v1/config.json");
+    curl_easy_setopt(c, CURLOPT_URL, C120_CONFIG_URL);
     curl_easy_setopt(c, CURLOPT_NOPROXY, "*");
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 250L);
     curl_easy_setopt(c, CURLOPT_TIMEOUT_MS, timeout_ms);
@@ -419,12 +435,14 @@ static int pipeline(long timeout_ms)
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &b);
     long status = 0;
     CURLcode rc = curl_easy_perform(c);
+    pipeline_timeout = rc == CURLE_OPERATION_TIMEDOUT;
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
     curl_easy_cleanup(c);
     J *o = rc == CURLE_OK && status == 200 ? parse(b.buf, b.len) : NULL;
     int ok = 0;
     reason = "Waiting for camera";
     if (!o) {
+        if (!pipeline_timeout || (status && status != 200)) pipeline_verified = 0;
         syslog(LOG_WARNING,"Camera configuration unavailable: curl=%d HTTP=%ld bytes=%zu",rc,status,b.len);
         return 0;
     }
@@ -451,9 +469,11 @@ static int pipeline(long timeout_ms)
             dims[0] + dims[2] > main_width || dims[1] + dims[3] > main_height) goto done;
     }
     json_object_put(regions); regions = json_object_get(r);
+    reason = "Waiting for analysis";
     ok = 1;
 done:
     json_object_put(o);
+    pipeline_verified = ok ? now() : 0;
     return ok;
 }
 
@@ -471,6 +491,7 @@ static struct tensors input, output;
 static uint64_t descriptor[5401];
 static unsigned channel;
 static int sys_ready, device_ready, channel_ready, input_ready, output_ready, port_ready;
+static int engine_stopping;
 static pid_t owner_pid;
 static struct port_config port_cfg;
 static struct port port = {34, 0, 0, 2};
@@ -530,24 +551,31 @@ static int model_read(void *dest, uint32_t offset, uint32_t length, const char *
     return gzread(model, dest, length) == (int)length ? 0 : -1;
 }
 
-static int port_used(int *bound)
+static int port_dump(FILE *f, int *bound)
 {
-    FILE *f = fopen(SCL_PROC, "r");
-    if (!f) return -1;
-    char line[512]; int section = 0, seen = 0, used = 0;
+    char line[512]; int section = 0, complete = 0, bindings_complete = 0, used = 0;
     *bound = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strstr(line, "BindPeerInputPortList")) section = 1;
-        if (strstr(line, "start dump SCL module")) section = 0;
-        if (strstr(line, "start dump scl OUTPUT PORT info")) { section = 2; seen = 1; }
+        if (strstr(line, "start dump SCL module")) { bindings_complete = section == 1; section = 0; }
+        if (strstr(line, "start dump scl OUTPUT PORT info")) section = 2;
+        if (section == 2 && strstr(line, "End dump SCL OUTPUT PORT info")) { complete = 1; section = 0; }
         unsigned d, c, p;
         if (sscanf(line, "%u %u %u", &d, &c, &p) == 3 && d == 0 && c == 0 && p == 2) {
             if (section == 1) *bound = 1;
             if (section == 2) used = 1;
         }
     }
+    return complete && bindings_complete && !ferror(f) ? used : -1;
+}
+
+static int port_used(int *bound)
+{
+    FILE *f = fopen(SCL_PROC, "r");
+    if (!f) return -1;
+    int used = port_dump(f, bound);
     fclose(f);
-    return seen ? used : -1;
+    return used;
 }
 
 static int same_port(const struct port_config *a, const struct port_config *b)
@@ -563,8 +591,16 @@ static int same_port(const struct port_config *a, const struct port_config *b)
 static int owns_port(void)
 {
     struct port_config current = {0}; int bound = 0;
-    return port_ready && owner_pid == camera_pid() && port_used(&bound) == 1 && !bound &&
-        !get_port(0, 0, 2, &current) && same_port(&current, &port_cfg);
+    if (!port_ready) return 0;
+    pid_t current_owner = camera_pid();
+    if (!current_owner) return -1;
+    if (owner_pid != current_owner) return 0;
+    int used = port_used(&bound);
+    /* An unavailable/truncated query is not evidence that somebody else owns it. */
+    if (used < 0) return -1;
+    if (!used || bound) return 0;
+    if (get_port(0, 0, 2, &current)) return -1;
+    return same_port(&current, &port_cfg);
 }
 
 static void audio_stop(void)
@@ -580,11 +616,15 @@ static void audio_stop(void)
     memset(sound_scores, 0, sizeof(sound_scores));
 }
 
-static void visual_stop(void)
+static int visual_stop(void)
 {
+    int owned = owns_port();
+    if (owned < 0) return -1;
     unlink(LIGHT_SIGNAL);
     if (model) { gzclose(model); model = NULL; }
-    if (owns_port()) { depth(0, &port, 0, 0); disable_port(0, 0, 2); }
+    if (owned) {
+        if (depth(0, &port, 0, 0) || disable_port(0, 0, 2)) return -1;
+    }
     port_ready = 0;
     if (output_ready) put_out(channel, &output);
     if (input_ready) put_in(channel, &input);
@@ -592,11 +632,14 @@ static void visual_stop(void)
     output_ready = input_ready = channel_ready = 0;
     active_model.id[0]=0;
     memset(last_seen,0,sizeof(last_seen));
+    return 0;
 }
 
-static void engine_stop(void)
+static int engine_stop(void)
 {
-    visual_stop(); audio_stop();
+    engine_stopping = 1;
+    if (visual_stop()) return -1;
+    audio_stop();
     if (sound_output_ready) put_out(sound_channel, &sound_output);
     if (sound_input_ready) put_in(sound_channel, &sound_input);
     if (sound_channel_ready) destroy_chn(sound_channel);
@@ -606,6 +649,36 @@ static void engine_stop(void)
     sound_output_ready = sound_input_ready = sound_channel_ready = 0;
     memset(last_seen, 0, sizeof(last_seen));
     memset(sound_last_seen, 0, sizeof(sound_last_seen));
+    engine_stopping = 0;
+    return 0;
+}
+
+static int model_pipeline_ready(void)
+{
+    for (unsigned attempt=0;attempt<3;++attempt) {
+        if (stopping || !access(AP,F_OK) || camera_pid()!=owner_pid) break;
+        int ready=pipeline(2500L);
+        if (stopping || !access(AP,F_OK) || camera_pid()!=owner_pid) break;
+        if (ready) return 1;
+        if (!pipeline_timeout || attempt==2) {
+            snprintf(model_error,sizeof(model_error),"Camera not ready during model load: %s",reason);
+            return 0;
+        }
+        /* Loading can briefly occupy Majestic's HTTP worker; retry only its timeout. */
+        usleep(200000);
+    }
+    snprintf(model_error,sizeof(model_error),"Camera stopped or setup AP active during model load");
+    return 0;
+}
+
+static int runtime_pipeline_ready(void)
+{
+    int ready = pipeline(50L);
+    /* Drain media promptly; a short HTTP timeout is not a changed configuration. */
+    if (!ready && pipeline_timeout && device_ready && !engine_stopping &&
+        !stopping && access(AP,F_OK) && owner_pid==camera_pid() && pipeline_verified &&
+        now()-pipeline_verified<=10) return 1;
+    return ready;
 }
 
 static int visual_start(const char *id)
@@ -617,29 +690,35 @@ static int visual_start(const char *id)
     if (!model && candidate.fd>=0) close(candidate.fd);
     uint32_t meta[32]={0},attr[16]={0,1,1,1};
     snprintf(model_error,sizeof(model_error),"Model metadata or channel could not be loaded");
-    if (!model || info(model_read,MODEL,meta) || meta[1]!=candidate.bytes || !meta[0] || meta[0]>1687552 ||
-        (!candidate.bird && meta[0]!=1687552)) goto fail;
-    /* The shared device already owns scratch. Admit weights, I/O and feed queues separately. */
-    unsigned needed=candidate.bytes+(candidate.bird?1685504:538944)+1080000+512*1024;
+    if (!model || info(model_read,MODEL,meta) || meta[1]!=candidate.bytes || !meta[0] || meta[0]>VISUAL_SCRATCH_BYTES ||
+        (!candidate.bird && meta[0]!=VISUAL_SCRATCH_BYTES)) goto fail;
+    /* The shared device already owns scratch. Tensor sizes follow channel creation. */
+    unsigned reserve=VISUAL_RESERVE_BYTES,needed=candidate.bytes+reserve;
     if (mma_kb()*1024u<needed) { snprintf(model_error,sizeof(model_error),"Insufficient media memory for this model"); goto fail; }
     if (create_chn(&channel,attr,model_read,MODEL)) goto fail;
     channel_ready = 1;
     gzclose(model); model = NULL;
     if (get_desc(channel, descriptor)) goto fail;
     uint32_t *d = (uint32_t *)descriptor;
+    unsigned io_bytes=0;
     if (candidate.bird) {
         snprintf(model_error,sizeof(model_error),"Unsupported raw YOLO input or output tensors");
-        if (d[0]!=1 || d[1]!=3 || bird_tensor_desc(d+2,320,320,3,&bird_input)) goto fail;
+        unsigned size=candidate.bird==BIRD_PRESENCE_384?384:320;
+        if (d[0]!=1 || d[1]!=3 || bird_tensor_desc(d+2,size,size,3,&bird_input)) goto fail;
+        io_bytes=bird_input.bytes;
         for (unsigned i=0;i<3;++i) {
             uint32_t *head=d+2+(60+i)*90; char name[12]; snprintf(name,sizeof(name),"head%u",8u<<i);
-            if (strncmp((char *)(head+12),name,256) || bird_tensor_desc(head,40u>>i,40u>>i,255,&bird_heads[i])) goto fail;
+            if (strncmp((char *)(head+12),name,256) || bird_tensor_desc(head,(size/8)>>i,(size/8)>>i,candidate.bird==BIRD_COCO?255:18,&bird_heads[i])) goto fail;
+            io_bytes+=bird_heads[i].bytes;
         }
     } else {
         if (d[0] != 1 || d[1] != 4 || d[3] != 1 || d[82] != 537600) goto fail;
         const unsigned sizes[] = {832, 256, 256, 64};
         for (unsigned i = 0; i < 4; ++i)
             if (d[2 + (60+i)*90 + 1] != 5 || d[2 + (60+i)*90 + 80] != sizes[i]) goto fail;
+        io_bytes=d[82]+sizes[0]+sizes[1]+sizes[2]+sizes[3];
     }
+    if (mma_kb()*1024u<io_bytes+reserve) { snprintf(model_error,sizeof(model_error),"Insufficient media memory for model tensors and analysis feed"); goto fail; }
     if (get_in(channel, &input)) goto fail;
     input_ready = 1;
     if (get_out(channel, &output)) goto fail;
@@ -647,10 +726,7 @@ static int visual_start(const char *id)
     if (input.count != 1 || output.count != (candidate.bird?3u:4u) || !input.items[0].data[0]) goto fail;
     for (unsigned i=0;i<output.count;++i) if (!output.items[i].data[0]) goto fail;
     reason = "Analysis feed unavailable";
-    snprintf(model_error,sizeof(model_error),"Camera stopped or setup AP active during model load");
-    if (stopping || !access(AP, F_OK) || camera_pid() != owner_pid) goto fail;
-    /* Model hashing/loading can briefly contend with the camera's HTTP worker. */
-    if (!pipeline(2500L)) { snprintf(model_error,sizeof(model_error),"Camera not ready during model load: %s",reason); goto fail; }
+    if (!model_pipeline_ready()) goto fail;
     snprintf(model_error,sizeof(model_error),"Analysis port in use during model load");
     if (port_used(&bound) != 0 || bound) goto fail;
     memset(&port_cfg, 0, sizeof(port_cfg));
@@ -673,12 +749,16 @@ static int visual_switch(void)
     const char *requested=json_object_get_string(field(settings,"model"));
     struct detector_model rollback_profile=active_model;
     char rollback[49]; snprintf(rollback,sizeof(rollback),"%s",*active_model.id?active_model.id:previous_model);
-    visual_stop();
+    if (visual_stop()) {
+        missing_model=1;
+        snprintf(model_error,sizeof(model_error),"Waiting to release analysis port"); return -1;
+    }
     if (!visual_start(requested)) {
         snprintf(previous_model,sizeof(previous_model),"%s",requested);
         model_error[0]=0; missing_model=0; return 0;
     }
     char err[160]; snprintf(err,sizeof(err),"%s",model_error);
+    if (port_ready) { missing_model=1; return -1; }
     missing_model=!model_available(requested);
     if (strcmp(rollback,requested) && !visual_start(rollback)) {}
     else if (strcmp(rollback,"stock") && !visual_start("stock")) {}
@@ -692,11 +772,9 @@ static int visual_switch(void)
 
 static int engine_start(void)
 {
-    int bound=0,visual=boolean(settings,"enabled");
-    reason="Paused: analysis port is in use";
-    if (visual && (port_used(&bound)!=0 || bound)) return -1;
+    int visual=boolean(settings,"enabled");
     owner_pid=camera_pid();
-    uint32_t meta[32]={0},dev[16]={visual?1687552u:81920u,16,2,16},attr[16]={0,1,1,1};
+    uint32_t meta[32]={0},dev[16]={visual?VISUAL_SCRATCH_BYTES:81920u,16,2,16},attr[16]={0,1,1,1};
     reason="Model could not be loaded";
     if (sys_init(0)) goto fail;
     sys_ready=1;
@@ -919,9 +997,9 @@ static J *detect(void)
         const int16_t *data[3];
         for (unsigned i=0;i<3;++i) { data[i]=output.items[i].data[0]; if (flush(output.items[i].data[0],bird_heads[i].bytes)) { json_object_put(objects); return NULL; } }
         struct bird_box boxes[300];
-        int n=bird_decode(bird_heads,data,confidence,active_model.nms,800,port_cfg.height,boxes);
+        int n=bird_decode(bird_heads,data,active_model.bird,confidence,active_model.nms,800,port_cfg.height,boxes);
         if (n<0) { json_object_put(objects); return NULL; }
-        for (int i=0;i<n;++i) object(objects,"bird",14,boxes[i].score,boxes[i].x1,boxes[i].y1,boxes[i].x2,boxes[i].y2);
+        for (int i=0;i<n;++i) object(objects,"bird",active_model.bird==BIRD_COCO?14:0,boxes[i].score,boxes[i].x1,boxes[i].y1,boxes[i].x2,boxes[i].y2);
     } else {
     const unsigned sizes[] = {832, 256, 256, 64};
     for (int i = 0; i < 4; ++i) if (flush(output.items[i].data[0], sizes[i])) { json_object_put(objects); return NULL; }
@@ -1006,6 +1084,8 @@ static void signal_handler(int sig) { if (sig == SIGHUP) reloading = 1; else if 
 
 static int selftest(void)
 {
+    assert(startup_media_kb(1,0)==3215 && startup_media_kb(1,1)==3697);
+    assert(startup_media_kb(0,1)==2048);
     struct port_config a = {{0,0,2688,1520},800,450,0,0,11,0}, b = a;
     ((unsigned char *)&b)[14] = 0x55; ((unsigned char *)&b)[15] = 0xaa;
     assert(same_port(&a, &b));
@@ -1014,6 +1094,25 @@ static int selftest(void)
     CHANGED_PORT(width); CHANGED_PORT(height); CHANGED_PORT(mirror); CHANGED_PORT(flip);
     CHANGED_PORT(format); CHANGED_PORT(compression);
 #undef CHANGED_PORT
+    const char *dumps[] = {
+        "BindPeerInputPortList\n0 0 3\nstart dump SCL module\nstart dump scl OUTPUT PORT info\n0 0 2\nEnd dump SCL OUTPUT PORT info\n",
+        "BindPeerInputPortList\n0 0 2\nstart dump SCL module\nstart dump scl OUTPUT PORT info\n0 0 2\nEnd dump SCL OUTPUT PORT info\n",
+        "BindPeerInputPortList\nstart dump SCL module\nstart dump scl OUTPUT PORT info\nEnd dump SCL OUTPUT PORT info\n",
+        "start dump scl OUTPUT PORT info\n",
+        "start dump scl OUTPUT PORT info\n0 0 2\n",
+        "start dump scl OUTPUT PORT info\n0 0 2\nEnd dump SCL OUTPUT PORT info\n"
+    };
+    const int used[] = {1,1,0,-1,-1,-1}, bound[] = {0,1,0,0,0,0};
+    for (unsigned i=0;i<sizeof(dumps)/sizeof(dumps[0]);++i) {
+        FILE *f=fmemopen((void *)dumps[i],strlen(dumps[i]),"r"); int bind=-1;
+        assert(f && port_dump(f,&bind)==used[i] && bind==bound[i]); fclose(f);
+    }
+#ifdef C120_HOST_TEST
+    port_ready=1; owner_pid=camera_pid();
+    assert(owns_port()==-1 && engine_stop()==-1 && port_ready && engine_stopping);
+    port_ready=0;
+    assert(!engine_stop() && !engine_stopping);
+#endif
     settings = defaults(); assert(valid_settings(settings));
     J *bad = json_tokener_parse("{\"enabled\":1,\"confidence\":0.6,\"intervalMs\":500,\"motionRegions\":true}");
     assert(!valid_settings(bad)); json_object_put(bad);
@@ -1069,7 +1168,7 @@ int main(int argc, char **argv)
         /* Only fetch recording storage here; do not initialize IPU, audio or camera devices. */
         struct body b={0}; CURL *curl=curl_easy_init(); long code=0;
         if (curl) {
-            curl_easy_setopt(curl,CURLOPT_URL,"http://127.0.0.1/api/v1/config.json");
+            curl_easy_setopt(curl,CURLOPT_URL,C120_CONFIG_URL);
             curl_easy_setopt(curl,CURLOPT_NOPROXY,"*"); curl_easy_setopt(curl,CURLOPT_TIMEOUT_MS,1000L);
             curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,receive); curl_easy_setopt(curl,CURLOPT_WRITEDATA,&b);
             if (!curl_easy_perform(curl)) curl_easy_getinfo(curl,CURLINFO_RESPONSE_CODE,&code);
@@ -1146,9 +1245,10 @@ int main(int argc, char **argv)
             if (!visual && !sound) { if (access(AP,F_OK)) pipeline(700L); reason = "Disabled"; }
             else if (!access(AP, F_OK)) reason = "Paused: setup AP";
             else if (memory_kb() < (device_ready ? 3000u : 4096u) ||
-                mma_kb() < (device_ready ? 1536u : visual ? 11264u : 2048u)) reason = "Paused: low memory";
-            else ready = pipeline(700L);
-            if (device_ready && (owner_pid != camera_pid() || sound_rate != audio_rate || (port_ready && !owns_port()))) engine_stop();
+                mma_kb() < (device_ready ? 1536u : startup_media_kb(visual,sound))) reason = "Paused: low memory";
+            else ready = runtime_pipeline_ready();
+            if (engine_stopping && engine_stop()) { ready=0; reason="Waiting to release analysis port"; }
+            if (device_ready && (owner_pid != camera_pid() || sound_rate != audio_rate || (port_ready && owns_port()==0))) engine_stop();
             if (!ready) {
                 engine_stop(); sound_reason = sound ? reason : "Disabled";
                 json_object_put(objects); objects = NULL;
@@ -1164,12 +1264,12 @@ int main(int argc, char **argv)
                     json_object_put(objects); objects=NULL; json_object_put(events); events=json_object_new_array();
                 }
                 reason = visual ? "Detecting" : "Disabled";
-                if (visual && !port_ready) reason="Visual model unavailable";
+                if (visual && (!port_ready || !*active_model.id)) reason="Visual model unavailable";
                 if (!sound) sound_reason = "Disabled";
                 else if (!audio_rate) sound_reason = "Microphone disabled or unsupported sample rate";
             }
         }
-        if (ready && port_ready && start >= next_frame) {
+        if (ready && port_ready && *active_model.id && start >= next_frame) {
             json_object_put(objects); objects = detect();
             next_frame = start+number(settings,"intervalMs")/1000;
             if (objects) reason = "Detecting";
@@ -1197,7 +1297,9 @@ int main(int argc, char **argv)
         if (start >= next_state) { state(json_object_get(objects)); next_state = start+.5; }
         usleep(10000);
     }
-    engine_stop(); reason = sound_reason = "Service stopped"; state(NULL);
+    for (unsigned i=0;engine_stop() && i<50;++i) usleep(20000);
+    if (port_ready) syslog(LOG_ERR,"Analysis port could not be released before shutdown");
+    reason = sound_reason = "Service stopped"; state(NULL);
     notify_stop(); record_stop(); catalogue_stop(); unlink(PIDFILE); close(fd); curl_global_cleanup();
     json_object_put(objects); json_object_put(events); json_object_put(regions); json_object_put(settings);
     return 0;

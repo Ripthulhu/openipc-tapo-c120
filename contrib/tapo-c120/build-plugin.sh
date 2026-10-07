@@ -27,7 +27,7 @@ cp -R "$base/ap-recovery-plugin/." "$ap/"
 cp -R "$base/runtime-overlay" "$runtime/"
 mkdir -p "$ap/files/etc/init.d"
 cp "$base/install-runtime.sh" "$base/dashboard-luminance.sed" "$base/dashboard-memory.html" \
-	"$base/floodlight-url.html" "$base/live-audio.html" "$base/README.md" "$runtime/"
+	"$base/floodlight-url.html" "$base/live-audio.html" "$base/live-feed.sed" "$base/README.md" "$runtime/"
 cp "$binary" "$ap/files/usr/bin/c120-eventd"
 cp "$binary" "$runtime/runtime-overlay/usr/bin/c120-eventd"
 cp "$base/runtime-overlay/etc/init.d/S45c120-ap-button" "$ap/files/etc/init.d/"

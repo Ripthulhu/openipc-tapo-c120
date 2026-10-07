@@ -1,0 +1,19 @@
+#!/bin/sh
+case "$1" in
+    start)
+        [ ! -e /run/c120-setup-ap.active ] || exit 0
+        start-stop-daemon -S -b -p /run/openipc-mqtt.pid -x /usr/bin/openipc-mqtt
+        ;;
+    stop)
+        start-stop-daemon -K -p /run/openipc-mqtt.pid -x /usr/bin/openipc-mqtt -s TERM || true
+        for i in 1 2 3 4 5; do
+            start-stop-daemon -K -t -p /run/openipc-mqtt.pid -x /usr/bin/openipc-mqtt >/dev/null 2>&1 || exit 0
+            sleep 1
+        done
+        ! start-stop-daemon -K -t -p /run/openipc-mqtt.pid -x /usr/bin/openipc-mqtt >/dev/null 2>&1
+        ;;
+    restart|reload)
+        "$0" stop && "$0" start
+        ;;
+    *) echo "Usage: $0 start|stop|restart" >&2; exit 2 ;;
+esac

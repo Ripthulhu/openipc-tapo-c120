@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
+#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 #include "mp4.h"
@@ -170,7 +171,7 @@ static int storage(char dir[512])
     if (fs.f_type != 0x4d44 && fs.f_type != 0x2011bab0 && fs.f_type != 0xef53 &&
         fs.f_type != 0x6969 && fs.f_type != (long)0xff534d42 && fs.f_type != (long)0xfe534d42) return -1;
     struct statvfs space;
-    if (statvfs(parent,&space) || !space.f_blocks || space.f_bavail < 1 ||
+    if (statvfs(parent,&space) || (space.f_flag & ST_RDONLY) || !space.f_blocks || space.f_bavail < 1 ||
         (double)(space.f_blocks-space.f_bavail)*100/space.f_blocks >= limit ||
         (double)space.f_bavail*space.f_frsize < 8*1024*1024) return -1;
     for (char *p=dir+1,*component=p;;++p) if (*p=='/' || !*p) {
@@ -222,6 +223,8 @@ static void snapshot_start(void)
 void record_poll(void)
 {
     double t = now();
+    const char *failure="Recording stream interrupted";
+    CURLcode stream_result=CURLE_OK;
     int automatic=json_object_get_boolean(field(config,"enabled"));
     if (!automatic && t>=manual_until) { record_stop(); catalogue_recording_enabled(0); status="Disabled"; return; }
     if (native_enabled) { record_stop(); status = "Paused: native recorder enabled"; return; }
@@ -233,33 +236,40 @@ void record_poll(void)
         snprintf(directory,sizeof(directory),"%s",dir);
         time_t wall = time(NULL);
         int n = snprintf(partial,sizeof(partial),"%s/AI-%lld-%llu-XXXXXX.partial",dir,(long long)wall,(unsigned long long)(t*1000));
-        if (n < 0 || n >= (int)sizeof(partial)) goto failed;
-        fd = mkstemps(partial,8); if (fd < 0) goto failed;
+        if (n < 0 || n >= (int)sizeof(partial)) { failure="Recording path too long"; goto failed; }
+        fd = mkstemps(partial,8); if (fd < 0) { failure="Cannot create recording file"; goto failed; }
         fcntl(fd,F_SETFD,FD_CLOEXEC);
         fchmod(fd,0644);
         snprintf(finished,sizeof(finished),"%s",partial); strcpy(finished+strlen(finished)-8,".mp4");
-        multi = curl_multi_init(); stream = curl_easy_init(); if (!multi || !stream) goto failed;
+        multi = curl_multi_init(); stream = curl_easy_init();
+        if (!multi || !stream) { failure="Cannot initialize recording stream"; goto failed; }
         curl_easy_setopt(stream,CURLOPT_URL,C120_RECORD_URL);
         curl_easy_setopt(stream,CURLOPT_NOPROXY,"*"); curl_easy_setopt(stream,CURLOPT_NOSIGNAL,1L);
         curl_easy_setopt(stream,CURLOPT_CONNECTTIMEOUT_MS,500L);
         curl_easy_setopt(stream,CURLOPT_WRITEFUNCTION,write_video);
         curl_easy_setopt(stream,CURLOPT_BUFFERSIZE,16384L);
-        if (curl_multi_add_handle(multi,stream)) goto failed;
+        if (curl_multi_add_handle(multi,stream)) { failure="Cannot attach recording stream"; goto failed; }
         started = last_data = t; wall_started=wall; space_check = 0; status = "Recording";
         manual_clip=t<manual_until;
         snapshot_start();
     }
     if (!stream) return;
     int running, messages;
-    if (curl_multi_perform(multi,&running) != CURLM_OK || t-last_data > 5) goto failed;
+    if (curl_multi_perform(multi,&running) != CURLM_OK) { failure="Cannot poll recording stream"; goto failed; }
+    if (t-last_data > 5) { failure="Recording stream stalled"; goto failed; }
     CURLMsg *message;
     while ((message=curl_multi_info_read(multi,&messages))) {
         if (message->easy_handle==snapshot) snapshot_stop(message->data.result==CURLE_OK);
-        else goto failed;
+        else { stream_result=message->data.result; goto failed; }
     }
     return;
-failed:
-    broken=1; record_stop(); status = "Recording unavailable; retrying"; retry = t+5;
+failed: {
+    long http_status=0; int saved_errno=errno,had_file=fd>=0;
+    if (stream) curl_easy_getinfo(stream,CURLINFO_RESPONSE_CODE,&http_status);
+    syslog(LOG_WARNING,"%s (HTTP %ld, curl %d, errno %d)",failure,http_status,stream_result,saved_errno);
+    broken=1; record_stop(); if (!had_file) ++errors;
+    last_error=failure; status = "Recording unavailable; retrying"; retry = t+5;
+}
 }
 J *record_state(void)
 {

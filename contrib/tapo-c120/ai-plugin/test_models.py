@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import numpy as np
 
@@ -69,6 +70,8 @@ class Model(C.Structure):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--golden', type=Path)
+    parser.add_argument('--presence-golden', type=Path)
+    parser.add_argument('--presence384-golden', type=Path)
     args = parser.parse_args()
     test_fat_install()
     with tempfile.TemporaryDirectory(prefix='c120-model-test-') as folder, tempfile.TemporaryDirectory(prefix='c120-card-test-', dir='/dev/shm') as card_folder:
@@ -96,6 +99,7 @@ def main():
         lib.models_request.argtypes = [C.c_void_p, C.c_char_p, C.c_char_p, C.c_char_p]
         lib.models_request.restype = C.c_void_p
         lib.model_open.argtypes = [C.c_char_p, C.POINTER(Model), C.c_char_p]
+        lib.model_profile.argtypes = [C.c_void_p, C.POINTER(Model)]
 
         def result(o):
             assert o
@@ -174,7 +178,7 @@ def main():
         lib.bird_tensor_desc.argtypes = [C.c_void_p, C.c_uint, C.c_uint, C.c_uint, C.POINTER(Tensor)]
         lib.bird_quantize.argtypes = [C.c_void_p, C.c_uint, C.POINTER(Tensor), C.c_void_p]
         lib.bird_prepare.argtypes = [C.POINTER(Image), C.POINTER(Tensor), C.c_void_p]
-        lib.bird_decode.argtypes = [C.POINTER(Tensor), C.POINTER(C.c_void_p), C.c_float, C.c_float, C.c_uint, C.c_uint, C.POINTER(Box)]
+        lib.bird_decode.argtypes = [C.POINTER(Tensor), C.POINTER(C.c_void_p), C.c_int, C.c_float, C.c_float, C.c_uint, C.c_uint, C.POINTER(Box)]
         desc = np.zeros(90, dtype='<u4')
         desc[:6] = [4, 2, 1, 320, 320, 3]
         desc[76], desc[80] = 6, 614400
@@ -204,13 +208,58 @@ def main():
         # A bird runner-up must not bypass single-label classification.
         p = raw[0][20, 20]
         p[:4], p[4], p[19], p[5] = 5, 5005, 4005, 6005
-        assert lib.bird_decode(heads, ptrs, .25, .45, 800, 450, boxes) == 0
+        assert lib.bird_decode(heads, ptrs, 1, .25, .45, 800, 450, boxes) == 0
         p[5] = -12000
-        assert lib.bird_decode(heads, ptrs, .25, .45, 800, 450, boxes) == 1 and boxes[0].index == 820
+        assert lib.bird_decode(heads, ptrs, 1, .25, .45, 800, 450, boxes) == 1 and boxes[0].index == 820
         p[4], p[19] = 5, 5  # sigmoid(0)*sigmoid(0) == .25: strict cutoff.
-        assert lib.bird_decode(heads, ptrs, .25, .45, 800, 450, boxes) == 0
-        assert lib.bird_decode(heads, ptrs, .25, 1.0, 800, 450, boxes) == -1
+        assert lib.bird_decode(heads, ptrs, 1, .25, .45, 800, 450, boxes) == 0
+        assert lib.bird_decode(heads, ptrs, 1, .25, 1.0, 800, 450, boxes) == -1
+        assert lib.bird_decode(heads, ptrs, 2, .70, .45, 800, 450, boxes) == -1
+        assert lib.bird_decode(heads, ptrs, 0, .70, .45, 800, 450, boxes) == -1
+        presence = json.loads((BASE/'bird-presence-profile.json').read_text())
+        o = js.json_tokener_parse(json.dumps(presence).encode())
+        m = Model()
+        assert lib.model_profile(o, C.byref(m)) == 1 and m.bird == 2 and m.bytes == 4205568
+        js.json_object_put(o)
+        small = (Tensor*3)(*[Tensor(s, s, 18, 48, s*s*48, .001, 5) for s in (40, 20, 10)])
+        arrays = [np.full((s, s, 24), -12000, dtype='<i2') for s in (40, 20, 10)]
+        pointers = (C.c_void_p*3)(*[a.ctypes.data for a in arrays])
+        p = arrays[0][20, 20]
+        p[6:10], p[10:12] = 5, 5005  # Second anchor; physical padding must not shift anchors.
+        assert lib.bird_decode(small, pointers, 2, .70, .45, 800, 450, boxes) == 1 and boxes[0].index == 2420
+        assert lib.bird_decode(small, pointers, 1, .70, .45, 800, 450, boxes) == -1
+        p[10:12] = 5
+        assert lib.bird_decode(small, pointers, 2, .25, .45, 800, 450, boxes) == 0
+        assert lib.bird_decode(small, pointers, 3, .70, .45, 800, 450, boxes) == -1
+        wide = (Tensor*3)(*[Tensor(s, s, 18, 48, s*s*48, .001, 5) for s in (48, 24, 12)])
+        dense = [np.full((s, s, 24), 5, dtype='<i2') for s in (48, 24, 12)]
+        for a in dense:
+            for anchor in range(3):
+                a[..., anchor*6+4:anchor*6+6] = 5005
+        dense_ptrs = (C.c_void_p*3)(*[a.ctypes.data for a in dense])
+        assert lib.bird_decode(wide, dense_ptrs, 3, .70, .45, 800, 450, boxes) == 300
+        assert lib.bird_decode(wide, dense_ptrs, 2, .70, .45, 800, 450, boxes) == -1
+        desc384 = desc.copy()
+        desc384[3:5], desc384[80] = 384, 384*384*6
+        t384 = Tensor()
+        assert lib.bird_tensor_desc(desc384.ctypes.data, 384, 384, 3, C.byref(t384)) == 0
+        assert lib.bird_tensor_desc(desc384.ctypes.data, 320, 320, 3, C.byref(t384)) == -1
+        assert lib.bird_tensor_desc(desc384.ctypes.data, 384, 384, 3, C.byref(t384)) == 0
+        pixels384 = rng.integers(0, 256, (384, 384, 3), dtype=np.uint8)
+        output384 = np.zeros((384, 384, 3), dtype='<i2')
+        im384 = Image(pixels384.ctypes.data, None, None, 384, 384, 1152, 0, 0)
+        assert lib.bird_prepare(C.byref(im384), C.byref(t384), output384.ctypes.data) == 0
+        expected384 = np.clip((pixels384.astype(np.float32)/np.float32(255))/np.float32(t384.scale), -32768, 32767).astype('<i2')
+        assert np.array_equal(output384, expected384)
+        im384 = Image(None, y.ctypes.data, uv.ctypes.data, 800, 450, 0, 800, 800)
+        assert lib.bird_prepare(C.byref(im384), C.byref(t384), output384.ctypes.data) == 0
+        assert np.all(output384[84:300] == 0) and np.all(output384[:84] == int(np.float32(114/255)/np.float32(t384.scale)))
+        profile384 = json.loads((BASE/'bird-presence-384-profile.json').read_text())
+        o = js.json_tokener_parse(json.dumps(profile384).encode())
+        assert lib.model_profile(o, C.byref(m)) == 1 and m.bird == 3 and m.bytes == 4291136
+        js.json_object_put(o)
         print('PASS: tensor pitches/quantization, RGB/NV12 letterbox, padding, best-class policy, strict cutoff and thresholds')
+        print('PASS: explicit 384 profile/input/grids, all 9072 dense candidates and decoder/size mismatch rejection')
 
         if args.golden:
             from PIL import Image as PillowImage
@@ -226,6 +275,18 @@ def main():
                 expected = np.clip((np.asarray(canvas, dtype=np.float32)/np.float32(255))/np.float32(t.scale), -32768, 32767).astype('<i2')
                 assert np.array_equal(output, expected), (width, height, int(np.max(np.abs(output.astype(int)-expected.astype(int)))))
             print('PASS: RGB bilinear/letterbox byte-identical to Pillow on five synthetic camera-size/asymmetric inputs')
+            for width, height in [(800, 450), (800, 448), (640, 360), (321, 180), (384, 384)]:
+                pixels = rng.integers(0, 256, (height, width, 3), dtype=np.uint8)
+                im = Image(pixels.ctypes.data, None, None, width, height, width*3, 0, 0)
+                assert lib.bird_prepare(C.byref(im), C.byref(t384), output384.ctypes.data) == 0
+                gain = min(384/width, 384/height)
+                size = (round(width*gain), round(height*gain))
+                canvas = PillowImage.new('RGB', (384, 384), (114, 114, 114))
+                canvas.paste(PillowImage.fromarray(pixels).resize(size, PillowImage.Resampling.BILINEAR),
+                             (round((384-size[0])/2-.1), round((384-size[1])/2-.1)))
+                expected = np.clip((np.asarray(canvas, dtype=np.float32)/np.float32(255))/np.float32(t384.scale), -32768, 32767).astype('<i2')
+                assert np.array_equal(output384, expected), (width, height)
+            print('PASS: 384 RGB bilinear/letterbox byte-identical to Pillow on five synthetic inputs')
             evidence = json.loads((args.golden/'results.json').read_text())
             metadata = evidence['native_metadata']
             checked = 0
@@ -241,7 +302,7 @@ def main():
                                               head['quantization']['scale'], int(head['quantization']['zero_point']))
                                        for a, head in zip(arrays, photo['heads'])])
                 pointers = (C.c_void_p*3)(*[a.ctypes.data for a in arrays])
-                n = lib.bird_decode(tensors, pointers, .25, .45, photo['width'], photo['height'], boxes)
+                n = lib.bird_decode(tensors, pointers, 1, .25, .45, photo['width'], photo['height'], boxes)
                 gold = photo['detections']
                 assert n == len(gold), (photo['prefix'], n, len(gold))
                 for actual, reference in zip(boxes[:n], gold):
@@ -251,6 +312,71 @@ def main():
                     assert np.max(np.abs(np.array([actual.x1, actual.y1, actual.x2, actual.y2])-expected)) < 2e-6
                 checked += 1
             print('PASS: byte-identical saved quantized inputs and raw-head detections on', checked, 'offline photos')
+
+        for golden, side, decoder in [(args.presence_golden, 320, 2), (args.presence384_golden, 384, 3)]:
+            if not golden:
+                continue
+            root = golden.resolve()
+            sys.path.insert(0, str(root.parent))
+            from native_photos import decode, detections, HEADS
+            profile_path=root.parent/'model/profile.json'
+            metadata = json.loads(profile_path.read_text())['tested_simulator_metadata']
+            export_dir='export-trained' if side==384 else 'export'
+            export_path=root.parent/export_dir/'export_manifest.json'
+            export = json.loads(export_path.read_text())
+            selection = json.loads((root/'selection.json').read_text())
+            manifest = json.loads((root/'manifest.json').read_text())
+            compact=json.loads((BASE/('bird-presence-384-profile.json' if side==384 else 'bird-presence-profile.json')).read_text())
+            assert selection['model_sha256'] == manifest['model_sha256'] == compact['sha256']
+            assert hashlib.sha256((root.parent/'model/model_sgsimg.img').read_bytes()).hexdigest() == compact['sha256']
+            assert manifest['export_manifest_sha256'] == hashlib.sha256(export_path.read_bytes()).hexdigest()
+            assert manifest['profile_sha256'] == hashlib.sha256(profile_path.read_bytes()).hexdigest()
+            assert export['input_shape'] == [1, 3, side, side] and export['bird_class'] == 0
+            assert export['pixel_anchors'] == [[[10,13],[16,30],[33,23]],[[30,61],[62,45],[59,119]],[[116,90],[156,198],[373,326]]]
+            checked = 0
+            for source, recorded in zip(selection['source_rows'], manifest['rows']):
+                path = root/'packed'/f"{source['image_id']}.npz"
+                assert hashlib.sha256(path.read_bytes()).hexdigest() == recorded['files']['packed']['sha256']
+                with np.load(path, allow_pickle=False) as saved:
+                    tin = Tensor(side, side, 3, 6, side*side*6, *metadata['inputs'][0]['quantization'])
+                    normalized, native = saved['input_nhwc'], saved['input_s16']
+                    encoded = np.empty_like(native)
+                    assert lib.bird_quantize(normalized.ctypes.data, side*side, C.byref(tin), encoded.ctypes.data) == 0
+                    assert np.array_equal(encoded, native), source['image_id']
+                    source_path=root/'onnx'/f"{source['image_id']}.npz"
+                    assert hashlib.sha256(source_path.read_bytes()).hexdigest() == recorded['files']['onnx']['sha256']
+                    with np.load(source_path, allow_pickle=False) as original:
+                        assert np.array_equal(original['input_nhwc'], normalized)
+                        source_heads=[original[name+'_raw'].transpose(0,2,3,1) for name in HEADS]
+                        source_gold, source_score=detections(decode(source_heads, export), 0, source['preprocessing'])
+                        assert abs(source_score-recorded['scores']['onnx']['presence_score']) < 1e-6
+                    arrays = [saved[name+'_raw'] for name in HEADS]
+                    logical = [(a.astype(np.float32)-np.float32(info['quantization'][1]))*np.float32(info['quantization'][0])
+                               for a, info in zip(arrays, metadata['outputs'])]
+                    gold, score = detections(decode(logical, export), 0, source['preprocessing'])
+                    gold = [b for b in gold if np.float32(b['score']) > np.float32(.70)]
+                    assert abs(score-recorded['scores']['packed']['presence_score']) < 1e-6
+                    width, height = source['preprocessing']['oriented_wh']
+                    # Check both compact simulator layout and padded MI_IPU layout.
+                    for pitch in (18, 24):
+                        padded = []
+                        for a in arrays:
+                            p = np.full((*a.shape[:3], pitch), 32767, dtype='<i2')
+                            p[..., :18] = a
+                            padded.append(p)
+                        tensors = (Tensor*3)(*[Tensor(a.shape[2], a.shape[1], 18, pitch*2, a.nbytes, *info['quantization'])
+                                               for a, info in zip(padded, metadata['outputs'])])
+                        pointers = (C.c_void_p*3)(*[a.ctypes.data for a in padded])
+                        n = lib.bird_decode(tensors, pointers, decoder, .70, .45, width, height, boxes)
+                        assert n == len(gold), (source['image_id'], pitch, n, len(gold))
+                        for actual, reference in zip(boxes[:n], gold):
+                            assert actual.index == reference['candidate_index']
+                            assert abs(actual.score-reference['score']) < 2e-6
+                            expected = np.array(reference['box_xyxy_oriented'])/[width, height, width, height]
+                            assert np.max(np.abs(np.array([actual.x1, actual.y1, actual.x2, actual.y2])-expected)) < 2e-6
+                checked += 1
+            assert checked == 4
+            print('PASS:', side, 'four packed presence goldens, exact S16 inputs, threshold .70, NMS .45, boxes/scores/indices and both output pitches')
 
 
 if __name__ == '__main__':

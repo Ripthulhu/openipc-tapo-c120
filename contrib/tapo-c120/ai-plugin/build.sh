@@ -42,6 +42,7 @@ cp "$deps/speex/COPYING" "$lib/LICENSE-speexdsp"
 chmod 755 "$out/usr/bin/"* "$out/etc/init.d/S97c120-ai" "$out/var/www/cgi-bin/"*.cgi
 (cd "$out" && find usr etc var -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 cp "$src/install.sh" "$src/uninstall.sh" "$src/README.md" "$src/bird-coco-profile.json" \
+    "$src/bird-presence-profile.json" "$src/bird-presence-384-profile.json" \
     "$src/RECORDINGS-API.md" "$src/recordings-openapi.yaml" "$src/recordings-client.py" "$out/"
 chmod 755 "$out/install.sh" "$out/uninstall.sh"
 tar -czf "$out/../c120-ai-plugin.tgz" -C "$out" .
