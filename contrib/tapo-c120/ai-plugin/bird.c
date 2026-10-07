@@ -66,20 +66,24 @@ int bird_prepare(const struct bird_image *im,const struct bird_tensor *t,int16_t
     if (!w || !h) return -1;
     unsigned left=(unsigned)nearbyint((size-w)/2.0-.1),top=(unsigned)nearbyint((size-h)/2.0-.1);
     struct weights *wx=calloc(w,sizeof(*wx)),*wy=calloc(h,sizeof(*wy));
-    unsigned char *horizontal=malloc(w*im->height*3);
+    unsigned char *horizontal=malloc(w*16*3);
     if (!wx || !wy || !horizontal || weights(wx,im->width,w) || weights(wy,im->height,h)) { free(wx); free(wy); free(horizontal); return -1; }
     memset(dest,0,t->bytes);
     int16_t pad=quantize(114/255.0f,t); unsigned pitch=t->stride/2;
     for (unsigned i=0;i<size*size;++i) for (int c=0;c<3;++c) dest[i*pitch+c]=pad;
-    /* Separable antialiased bilinear resize; round each 8-bit pass like the photo baseline. */
-    for (unsigned y=0;y<im->height;++y) for (unsigned x=0;x<w;++x) {
-        int32_t sum[3]={1<<21,1<<21,1<<21};
-        for (unsigned k=0;k<wx[x].count;++k) { unsigned char p[3]; pixel(im,wx[x].first+k,y,p); for (int c=0;c<3;++c) sum[c]+=p[c]*wx[x].values[k]; }
-        for (int c=0;c<3;++c) horizontal[(y*w+x)*3+c]=clip(sum[c]>>22);
-    }
-    for (unsigned y=0;y<h;++y) for (unsigned x=0;x<w;++x) for (int c=0;c<3;++c) {
-        int32_t sum=1<<21; for (unsigned k=0;k<wy[y].count;++k) sum+=horizontal[((wy[y].first+k)*w+x)*3+c]*wy[y].values[k];
-        dest[((y+top)*size+x+left)*pitch+c]=quantize(clip(sum>>22)/255.0f,t);
+    /* Retain just the vertical filter's rows, preserving both 8-bit rounding passes. */
+    unsigned next=0;
+    for (unsigned y=0;y<h;++y) {
+        if (next<wy[y].first) next=wy[y].first;
+        for (;next<wy[y].first+wy[y].count;++next) for (unsigned x=0;x<w;++x) {
+            int32_t sum[3]={1<<21,1<<21,1<<21};
+            for (unsigned k=0;k<wx[x].count;++k) { unsigned char p[3]; pixel(im,wx[x].first+k,next,p); for (int c=0;c<3;++c) sum[c]+=p[c]*wx[x].values[k]; }
+            for (int c=0;c<3;++c) horizontal[((next%16)*w+x)*3+c]=clip(sum[c]>>22);
+        }
+        for (unsigned x=0;x<w;++x) for (int c=0;c<3;++c) {
+            int32_t sum=1<<21; for (unsigned k=0;k<wy[y].count;++k) sum+=horizontal[(((wy[y].first+k)%16)*w+x)*3+c]*wy[y].values[k];
+            dest[((y+top)*size+x+left)*pitch+c]=quantize(clip(sum>>22)/255.0f,t);
+        }
     }
     free(wx); free(wy); free(horizontal); return 0;
 }

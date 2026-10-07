@@ -117,11 +117,10 @@ int main(int argc,char **argv) {
         executable = root / 'ready'
         subprocess.run(['gcc', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-sign-compare',
                         '-DC120_HOST_TEST', '-DC120_CONFIG_URL="' + url + '"',
-                        '-DOUTSIDE_SPEEX', '-DRANDOM_PREFIX=c120', '-DFLOATING_POINT',
-                        '-I' + str(deps / 'kissfft'), '-I' + str(deps / 'speex'), str(harness),
+                        '-I' + str(deps / 'kissfft'), str(harness),
                         *[str(BASE / name) for name in ['sound.c', 'opus-input.c', 'notify.c', 'record.c',
                                                        'catalogue.c', 'models.c', 'bird.c']],
-                        str(deps / 'kissfft/kiss_fft.c'), str(deps / 'speex/resample.c'),
+                        str(deps / 'kissfft/kiss_fft.c'),
                         '-o', str(executable), *libs, '-lm', '-ldl'], check=True)
         for case, expected, count in CASES+RUNTIME:
             current['case'] = case

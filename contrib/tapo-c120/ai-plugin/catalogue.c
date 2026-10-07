@@ -447,10 +447,11 @@ static int compare_oldest(const void *a,const void *b)
     if (x->mtime!=y->mtime) return x->mtime<y->mtime?-1:1;
     return x->seq<y->seq?-1:x->seq>y->seq;
 }
-static void prune(void)
+static void prune(int cleanup)
 {
     struct catalogue c; if (acquire(&c,0)) return;
     int full=recording_enabled && !native_enabled && pressure(c.root,0)==1;
+    if (!full && !cleanup) { release(&c); return; }
     struct oldest oldest[32]; unsigned count=0;
     DIR *dir=fdopendir(dup(c.dir)); struct dirent *e;
     while (dir && (e=readdir(dir))) {
@@ -525,24 +526,46 @@ static size_t discard(char *p,size_t size,size_t n,void *unused) { (void)p; (voi
 static void deliver(void)
 {
     struct catalogue c; if (acquire(&c,1)) return;
-    DIR *dir=fdopendir(dup(c.dir)); if (!dir) { release(&c); return; }
-    J *item=NULL,*payload=NULL; char name[32]=""; struct dirent *e; time_t now=time(NULL);
+    J *item=NULL,*payload=NULL; char name[32]=""; time_t now=time(NULL);
+    uint64_t end=json_object_get_int64(get(c.state,"sequence"));
+    int64_t saved=json_object_get_int64(get(c.state,"deliveredThrough"));
+    uint64_t through=saved<0 || (uint64_t)saved>end?0:(uint64_t)saved, first=through;
+    int pending=0;
     char dest[24]; snprintf(dest,sizeof(dest),"%016" PRIx64,destination());
-    while ((e=readdir(dir))) {
-        if (strlen(e->d_name)!=25 || !isdigit((unsigned char)*e->d_name)) continue;
-        J *o=load(c.dir,e->d_name); if (!o || strcmp(str(o,"delivery"),"pending")) { json_object_put(o); continue; }
+    /* Finalized deliveries never need another metadata read. Keep retries durable. */
+    for (uint64_t seq=first+1;seq<=end;++seq) {
+        name_for(name,seq);
+        J *o=load(c.dir,name);
+        if (!o) {
+            struct stat st;
+            if (fstatat(c.dir,name,&st,AT_SYMLINK_NOFOLLOW)<0 && errno==ENOENT) {
+                if (!pending) through=seq;
+            } else pending=1;
+            continue;
+        }
+        if (strcmp(str(o,"delivery"),"pending")) {
+            if (!pending) through=seq;
+            json_object_put(o); continue;
+        }
         const char *cancel=NULL;
         if (!destination() || strcmp(dest,str(o,"destination"))) cancel="cancelled";
         else if (now-json_object_get_int64(get(o,"completedEpoch"))>=86400) cancel="expired";
         else if (!same_file(c.root,o)) cancel="deleted";
-        if (cancel) { text(o,"delivery",cancel); save(c.dir,e->d_name,o); json_object_put(o); continue; }
+        if (cancel) {
+            text(o,"delivery",cancel);
+            if (save(c.dir,name,o)) pending=1;
+            if (!pending) through=seq;
+            json_object_put(o); continue;
+        }
+        pending=1;
         if (now<json_object_get_int64(get(o,"nextAttempt"))) { json_object_put(o); continue; }
-        item=o; memcpy(name,e->d_name,26); payload=json_object_new_object();
+        item=o; payload=json_object_new_object();
         integer(payload,"schemaVersion",1); text(payload,"type","recording.ready");
         text(payload,"cameraId",str(o,"cameraId")); text(payload,"recordingId",str(o,"id"));
         json_object_object_add(payload,"recording",public_clip(c.root,o)); break;
     }
-    closedir(dir); release(&c); if (!item) return;
+    if (through!=first) { integer(c.state,"deliveredThrough",through); save(c.dir,"state.json",c.state); }
+    release(&c); if (!item) return;
     /* No catalogue lock during network I/O. This runs in a short-lived worker, never the inference loop. */
     CURL *curl=curl_easy_init(); struct curl_slist *headers=NULL; long code=0; CURLcode rc=CURLE_FAILED_INIT;
     headers=curl_slist_append(headers,"Content-Type: application/json"); char auth[544];
@@ -572,10 +595,11 @@ void catalogue_work(void)
     int lock=openat(c.dir,"worker.lock",O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
     if (lock<0 || flock(lock,LOCK_EX|LOCK_NB)) { if (lock>=0) close(lock); release(&c); return; }
     if (repair_refs(&c)) { close(lock); release(&c); return; }
-    time_t now=time(NULL); int scan=now-json_object_get_int64(get(c.state,"lastScan"))>=60;
+    time_t now=time(NULL),last=json_object_get_int64(get(c.state,"lastScan"));
+    int scan=!last || now<last || now-last>=300;
     if (scan) { integer(c.state,"lastScan",now); save(c.dir,"state.json",c.state); }
     release(&c);
-    prune();
+    prune(scan);
     int fd=storage(); if (fd<0) { close(lock); return; }
     /* Bound imports per pass. Existing refs make each subsequent pass incremental. */
     unsigned budget=64; if (scan) reconcile(fd,"",0,&budget);

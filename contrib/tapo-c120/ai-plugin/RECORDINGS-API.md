@@ -145,6 +145,10 @@ receiver may accept a request just before a timeout or power loss. A destination
 or token change cancels old pending events rather than sending history elsewhere.
 Expired/deleted clips are not retried. Polling is the authoritative catch-up path.
 No webhook is sent for historical imports, avoiding an alert storm on installation.
+A durable completion watermark skips finalized delivery metadata on later worker
+passes. Pending retries remain eligible; malformed existing metadata is not
+silently marked delivered. This changes neither ordering guarantees nor the
+at-least-once contract.
 
 ## Native Hooks, Recovery and Retention
 
@@ -156,10 +160,12 @@ plugin still owns the hook. A custom hook is never replaced: add
 Without a hook, reconciliation still imports closed native clips as unclassified
 historical entries, without notifications. No recording is enabled automatically.
 
-The native close hook performs local metadata work, not network delivery. A
-background pass imports up to 64 previously unindexed clips per minute and repairs
-interrupted metadata/path-reference updates. Open files, symlinks, incomplete/invalid MP4s
-and `.partial` files are excluded. Up to eight directory levels are scanned.
+The native close hook performs local metadata work immediately, not network
+delivery. A background pass imports up to 64 previously unindexed clips every
+five minutes; each worker pass repairs interrupted metadata/path-reference
+updates. Open files, symlinks, incomplete/invalid MP4s and `.partial` files are
+excluded. Up to eight directory levels are scanned. Full-card pressure is still
+checked every worker pass; only idle metadata cleanup uses the five-minute cadence.
 
 The catalogue lives in `.c120-recordings` below the non-date prefix of
 `records.path`. Use a dedicated directory such as `/mnt/mmcblk0/recordings/%F`.

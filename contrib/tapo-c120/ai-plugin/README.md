@@ -57,8 +57,9 @@ JPEG preview, and the last twelve detection events. The preview and inference ar
 separate samples, so boxes can lag a moving subject.
 
 Analysis defaults to one 800x448 frame every 500 ms. It does not change the main
-2560x1440 / 30 fps / 6000 kbit/s stream, JPEG settings, audio, lighting, or existing
-motion detection. Notification, AI recording and AI floodlight actions are opt-in.
+stream's configured resolution, frame rate or bitrate, JPEG settings, audio,
+lighting, or existing motion detection. Notification, AI recording and AI
+floodlight actions are opt-in.
 Both detectors are off for a fresh installation; existing settings are preserved
 on upgrade. The four-field visual-only configuration migrates with sound disabled.
 
@@ -93,8 +94,13 @@ process. A visual analysis-port conflict does not prevent that sound channel
 from starting; shared camera/readiness and memory guards still apply.
 It consumes Majestic's local `/audio.opus` stream with libcurl over
 HTTP/1.0. The firmware's libogg and libopus decode an analysis-only copy to
-48 kHz mono; SpeexDSP resamples it to 16 kHz, then the stock frontend decimates
-to 8 kHz. The user's microphone sample rate, codec and gain are not changed.
+16 kHz mono directly, then the stock frontend decimates to 8 kHz. Ogg timing
+remains in 48 kHz units, including pre-skip and end trimming. No separate
+resampler is linked. The user's microphone sample rate, codec and gain are
+not changed. The mel bank stores only its 501 nonzero coefficients, saving
+59.5 KiB of resident DSP state and avoiding zero-weight multiplications.
+Host tests validate the frontend and Opus timing, but recognition accuracy with
+libopus's native-rate decoding still needs controlled, labelled playback tests.
 Audio is analyzed in overlapping 2.064-second windows every 240 ms. Two qualifying
 windows in the last ten confirm an event. Repeats need a three-second absence and
 a ten-second per-category cooldown. Motion regions apply only to visual objects.
@@ -279,6 +285,12 @@ revision. The library allows 16 compatible models, each at most 8 MiB; uploads
 reserve another 1 MiB of free storage. Incomplete uploads can be cancelled.
 The selected, active and rollback models cannot be removed through the API.
 
+Bird preprocessing keeps 16 horizontally resized rows instead of a full
+intermediate image. At the 800x450 camera feed this saves approximately
+407 KiB for 320 input or 488 KiB for 384 input, with unchanged two-pass
+rounding. Synthetic RGB/NV12 fixtures are byte-identical to the earlier
+full-image implementation, including padded rows and portrait/upsampled inputs.
+
 The tested one-class bird profiles are
 [320x320](bird-presence-profile.json) and
 [384x384](bird-presence-384-profile.json). Both use RGB NHWC S16 input and three
@@ -357,6 +369,13 @@ reconnects occurred in other trials. The earlier Majestic exit's cause is not
 established; do not interpret the bounded final checks as proof it is fixed.
 
 ## API
+
+`GET /cgi-bin/c120-ai-api.cgi?view=status` returns the same live status and
+CSRF token without `config` or `models`. It avoids reading settings and
+enumerating the SD model library. Authentication, recovery-AP exclusion and
+stale-daemon checks are unchanged. The UI uses this for its one-second polls;
+full data is fetched on load/save, model operations, model changes, return
+to a visible tab and every minute. Unsaved form edits are preserved.
 
 `GET /cgi-bin/c120-ai-api.cgi` returns schema version 2, current `objects`, recent `events`, `status`,
 `running`, `frames`, resource use, `config` and a per-boot `csrf` token. It uses the
@@ -500,7 +519,6 @@ must be checked separately. They remain private to `/usr/lib/c120-ai` at runtime
 | uClibc compatibility | The matching toolchain's SDK compatibility library |
 | Frame ABI | See `../ai-probe/frame-abi.h` and its source/license attribution |
 | KissFFT | `mborgerding/kissfft` commit `8f47a67f595a6641c566087bf5277034be64f24d`, BSD-3-Clause |
-| SpeexDSP resampler | `xiph/speexdsp` commit `1b28a0f61bc31162979e1f26f3981fc3637095c8`, BSD-style; license shipped with the plugin |
 
 The stock descriptor groups object classes 2/3/7 as vehicles; 0 is person;
 cat and dog fixtures both returned class 4. Class 8 is deliberately not named or

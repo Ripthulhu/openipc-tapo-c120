@@ -4,34 +4,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include "kiss_fft.h"
-#include "speex_resampler.h"
 
 struct sound_dsp {
     kiss_fft_cfg fft;
-    SpeexResamplerState *resampler;
     sound_tensor_fn callback;
     void *user;
     unsigned rate, decimate, used, frames, column, since;
     float level_dbfs, gain;
     int active[SOUND_FRAMES];
-    float pcm[512], window[512], weights[64][257];
+    float pcm[512], window[512];
+    struct { unsigned first, count; float values[17]; } weights[64];
     int16_t history[SOUND_VALUES], tensor[SOUND_VALUES];
 };
 
 struct sound_dsp *sound_create(unsigned rate, float gain_db, sound_tensor_fn callback, void *user)
 {
-    if (rate < 8000 || rate > 48000 || !isfinite(gain_db) || gain_db < 0 || gain_db > 24 || !callback) return NULL;
+    if ((rate != 8000 && rate != 16000) || !isfinite(gain_db) || gain_db < 0 || gain_db > 24 || !callback) return NULL;
     struct sound_dsp *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
     s->rate = rate; s->callback = callback; s->user = user; s->level_dbfs = -120;
     s->gain = powf(10, gain_db/20);
     s->fft = kiss_fft_alloc(512, 0, NULL, NULL);
-    if (rate != 8000 && rate != 16000) {
-        int error;
-        s->resampler = speex_resampler_init(1, rate, 16000, 5, &error);
-        if (!s->resampler) { sound_destroy(s); return NULL; }
-        speex_resampler_skip_zeros(s->resampler);
-    }
     if (!s->fft) { sound_destroy(s); return NULL; }
     for (int n = 0; n < 512; ++n) s->window[n] = .5f - .5f * cos(2*M_PI*n/512);
     float points[66];
@@ -40,7 +33,12 @@ struct sound_dsp *sound_create(unsigned rate, float gain_db, sound_tensor_fn cal
         float hz = k*(8000.0f/512);
         float w = fminf((hz-points[m])/(points[m+1]-points[m]),
                        (points[m+2]-hz)/(points[m+2]-points[m+1]));
-        s->weights[m][k] = w < .0001f ? 0 : w;
+        if (w < .0001f) continue;
+        unsigned count = s->weights[m].count;
+        if (!count) s->weights[m].first = k;
+        if (count == 17 || (unsigned)k != s->weights[m].first + count) { sound_destroy(s); return NULL; }
+        s->weights[m].values[count] = w;
+        ++s->weights[m].count;
     }
     return s;
 }
@@ -48,7 +46,6 @@ struct sound_dsp *sound_create(unsigned rate, float gain_db, sound_tensor_fn cal
 void sound_destroy(struct sound_dsp *s)
 {
     if (!s) return;
-    if (s->resampler) speex_resampler_destroy(s->resampler);
     free(s->fft); free(s);
 }
 
@@ -68,7 +65,8 @@ static int frame(struct sound_dsp *s)
     power[0] = fabsf(out[0].r); power[256] = fabsf(out[256].r);
     for (int m = 0; m < 64; ++m) {
         float sum = 0;
-        for (int k = 0; k < 257; ++k) sum += power[k]*s->weights[m][k];
+        for (unsigned k = 0; k < s->weights[m].count; ++k)
+            sum += power[s->weights[m].first+k]*s->weights[m].values[k];
         mel[m] = 10*log10f(fmaxf(fabsf(sum), 1e-10f));
         peak = fmaxf(peak, mel[m]);
     }
@@ -108,15 +106,7 @@ float sound_level_dbfs(const struct sound_dsp *s) { return s ? s->level_dbfs : -
 int sound_pcm(struct sound_dsp *s, const int16_t *pcm, size_t count)
 {
     if (!s) return -1;
-    if (!s->resampler) return samples(s, pcm, count, s->rate != 8000);
-    while (count) {
-        int16_t out[1024];
-        spx_uint32_t in_len = count > 1024 ? 1024 : count, out_len = 1024;
-        int rc = speex_resampler_process_int(s->resampler, 0, pcm, &in_len, out, &out_len);
-        if (rc || !in_len || samples(s, out, out_len, 1)) return -1;
-        pcm += in_len; count -= in_len;
-    }
-    return 0;
+    return samples(s, pcm, count, s->rate != 8000);
 }
 
 #ifdef SOUND_TEST

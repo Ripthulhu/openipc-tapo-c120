@@ -3,6 +3,7 @@
     const el = id => document.getElementById('ai-' + id);
     const fields = el('fields'), preview = el('image');
     let token, loaded = false, busy = false, savePending = false, imageBusy = false, detections = [];
+    let savedConfig, nextFull = 0, fullPending = false;
     let models = [], selectedModel = 'stock', activeModel = '', previousModel = 'stock', writable = false, uploading = false, cancelUpload = false;
     const confidence = () => { el('confidence-value').textContent = el('confidence').value + '%'; };
     el('confidence').addEventListener('input', confidence);
@@ -44,8 +45,6 @@
         const options = ids.map(id => { const option=document.createElement('option'); option.value=id; option.textContent=models.find(m=>m.id===id)?.name || id+' (unavailable)'; return option; });
         el('model').replaceChildren(...options); el('model').value=desired;
         el('model-storage').textContent = data.models.storage + (writable ? '' : data.models.storage === 'No mounted SD card' ? '' : ' (read-only)');
-        el('model-active').textContent = activeModel ? 'Running: '+(data.activeModelName || activeModel)+(data.modelFallback?' (fallback)':'') : 'No visual model running';
-        el('model-error').textContent = data.modelError || ''; el('model-error').hidden = !data.modelError;
         const rows = [...models,...(data.models.uploads || []).map(id=>({id,name:id+' (unfinished upload)',categories:[],location:'SD card',upload:true}))].map(m => {
             const row=document.createElement('tr');
             for (const value of [m.name+(m.active?' · running':'')+(m.selected?' · selected':''),m.categories.map(c=>names[c] || c).join(', '),m.location]) {
@@ -68,6 +67,9 @@
         modelControls();
     }
     function render(data) {
+        if ((data.activeModel || '') !== activeModel || (data.previousModel || 'stock') !== previousModel) nextFull = 0;
+        el('model-active').textContent = data.activeModel ? 'Running: '+(data.activeModelName || data.activeModel)+(data.modelFallback?' (fallback)':'') : 'No visual model running';
+        el('model-error').textContent = data.modelError || ''; el('model-error').hidden = !data.modelError;
         el('status').textContent = data.status;
         detections = data.objects || [];
         el('objects').textContent = detections.length ? detections.map(o => label(o) + ' ' + Math.round(o.confidence * 100) + '%').join(' · ') : 'No current detections';
@@ -99,10 +101,11 @@
         el('sound-stats').textContent = data.soundRunning ? Number(data.soundInferenceMs).toFixed(1)+' ms inference · '+data.soundFrames+' windows analyzed' : '';
         el('notify-status').textContent = data.notifications?.status || 'Service stopped';
         el('record-status').textContent = data.recording?.status || 'Service stopped';
-        el('notify-test').disabled = !data.config.notifications.enabled || !data.running && !data.soundRunning;
+        el('notify-test').disabled = !savedConfig?.notifications.enabled || !data.running && !data.soundRunning;
     }
-    async function request(save = false) {
-        if (busy) { if (save) savePending = true; return; }
+    async function request(save = false, full = true) {
+        if (busy) { if (save) savePending = true; else if (full) fullPending = true; return; }
+        full = full || save || !loaded;
         busy = true;
         if (save) fields.disabled = true;
         try {
@@ -120,9 +123,10 @@
                 recording: {enabled: el('record-enabled').checked, seconds: +el('record-seconds').value,
                     categories: categories.filter(s => el('record-'+s).checked)}
             })});
-            const response = await fetch('c120-ai-api.cgi', options), data = await response.json();
+            const response = await fetch('c120-ai-api.cgi'+(full ? '' : '?view=status'), options), data = await response.json();
             if (!response.ok) throw new Error(data.error || 'AI request failed');
             token = data.csrf;
+            if (data.config) { savedConfig = data.config; nextFull = Date.now()+60000; }
             renderModels(data);
             if (!loaded || save) {
                 el('enabled').checked = data.config.enabled; el('confidence').value = Math.round(data.config.confidence*100);
@@ -155,6 +159,7 @@
         } finally {
             busy = false; fields.disabled = !loaded;
             if (savePending) { savePending = false; request(true); }
+            else if (fullPending) { fullPending = false; request(); }
         }
     }
     function snapshot() {
@@ -225,8 +230,9 @@
         }
     });
     async function poll() {
-        if (!document.hidden) { await request(); snapshot(); }
+        if (!document.hidden) { await request(false, Date.now() >= nextFull); snapshot(); }
         window.setTimeout(poll, 1000);
     }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) nextFull = 0; });
     poll();
 })();

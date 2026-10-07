@@ -16,5 +16,3 @@ fetch() {
 }
 fetch mborgerding/kissfft 8f47a67f595a6641c566087bf5277034be64f24d kissfft \
     kiss_fft.c kiss_fft.h _kiss_fft_guts.h kiss_fft_log.h COPYING LICENSES/BSD-3-Clause
-fetch xiph/speexdsp 1b28a0f61bc31162979e1f26f3981fc3637095c8 speex \
-    libspeexdsp/resample.c libspeexdsp/arch.h include/speex/speex_resampler.h COPYING

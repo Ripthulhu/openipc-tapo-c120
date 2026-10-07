@@ -23,8 +23,8 @@ mkdir -p "$lib"
 cp -a "$src/files/." "$out/"
 "$base/output/host/bin/arm-openipc-linux-musleabihf-gcc" \
     -Os -Wall -Wextra -Werror -Wno-sign-compare -Wl,--export-dynamic \
-    -DOUTSIDE_SPEEX -DRANDOM_PREFIX=c120 -DFLOATING_POINT -I"$deps/kissfft" -I"$deps/speex" \
-    "$src/c120-aid.c" "$src/sound.c" "$src/opus-input.c" "$src/notify.c" "$src/record.c" "$src/catalogue.c" "$src/models.c" "$src/bird.c" "$deps/kissfft/kiss_fft.c" "$deps/speex/resample.c" -o "$lib/c120-aid" \
+    -I"$deps/kissfft" \
+    "$src/c120-aid.c" "$src/sound.c" "$src/opus-input.c" "$src/notify.c" "$src/record.c" "$src/catalogue.c" "$src/models.c" "$src/bird.c" "$deps/kissfft/kiss_fft.c" -o "$lib/c120-aid" \
     -Wl,--whole-archive "$sdk/libuclibc-compat-static.a" -Wl,--no-whole-archive \
     -ljson-c -lcurl -logg -lopus -lz -lm -ldl
 "$base/output/host/bin/arm-openipc-linux-musleabihf-strip" "$lib/c120-aid"
@@ -38,7 +38,6 @@ cp "$ipu" "$lib/libmi_ipu.so"
 gzip -n -9 -c "$model" > "$lib/objects.img.gz"
 gzip -n -9 -c "$models/sed.sim_sgsimg8k.img" > "$lib/sound.img.gz"
 cp "$deps/kissfft/BSD-3-Clause" "$lib/LICENSE-kissfft"
-cp "$deps/speex/COPYING" "$lib/LICENSE-speexdsp"
 chmod 755 "$out/usr/bin/"* "$out/etc/init.d/S97c120-ai" "$out/var/www/cgi-bin/"*.cgi
 (cd "$out" && find usr etc var -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 cp "$src/install.sh" "$src/uninstall.sh" "$src/README.md" "$src/bird-coco-profile.json" \

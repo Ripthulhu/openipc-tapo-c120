@@ -365,7 +365,8 @@ static int api(void)
         if (rc) return error_reply(500, "Could not save settings");
         pid_t pid = daemon_pid(); if (pid) kill(pid, SIGHUP);
     } else if (strcmp(method, "GET")) return error_reply(405, "Use GET or POST");
-    read_settings();
+    const char *query=getenv("QUERY_STRING");
+    int full=strcmp(method,"GET") || !query || strcmp(query,"view=status");
     J *o = read_json(STATE);
     if (!o || !json_object_is_type(o, json_type_object)) { json_object_put(o); o = json_object_new_object(); }
     if (!daemon_pid() || now() - number(o, "monotonic") > 10) {
@@ -374,9 +375,12 @@ static int api(void)
         text(o, "soundStatus", "Service stopped"); add(o, "soundRunning", json_object_new_boolean(0));
         add(o, "sounds", json_object_new_array());
     }
-    add(o, "config", json_object_get(settings));
-    const char *active=json_object_get_string(field(o,"activeModel"));
-    add(o,"models",models_state(json_object_get_string(field(settings,"model")),active?active:""));
+    if (full) {
+        read_settings();
+        add(o, "config", json_object_get(settings));
+        const char *active=json_object_get_string(field(o,"activeModel"));
+        add(o,"models",models_state(json_object_get_string(field(settings,"model")),active?active:""));
+    }
     add(o,"schemaVersion",json_object_new_int(2));
     text(o, "csrf", csrf);
     reply(200, o);

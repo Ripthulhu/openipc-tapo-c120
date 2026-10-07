@@ -4,6 +4,50 @@ Dated observations and historical image hashes. These do not describe the bytes
 of a freshly rebuilt image or guarantee long-term stability. Current installation
 and source defaults are in [README.md](README.md).
 
+## AI Runtime Optimizations, 2026-10-08
+
+The second rollout replaces the helper on all four cameras with SHA256
+`080bd9b485d61859c3c103872f96a756ec75a5274b9158ac2c1c88efe320ac15`.
+The stripped ARM executable is 92,812 bytes versus 100,960 bytes previously.
+Majestic, video settings and each camera's saved AI/MQTT settings are unchanged.
+
+- libopus decodes directly to 16 kHz for analysis; the separate SpeexDSP
+  resampler is no longer built or linked. Camera microphone settings are untouched.
+- Sparse mel filters retain 501 coefficients and save 60,928 bytes of DSP state.
+- Bird preprocessing retains 16 source rows, not the entire horizontal image.
+  At 800x450 this saves 416,640 bytes for the 320 profile or 499,968 for 384.
+  Sixteen RGB/NV12 fixtures are byte-identical to the previous implementation.
+- Idle catalogue passes skip completed metadata. Durable webhook progress retains
+  retries; full-card checks remain frequent, with recovery scans every five minutes.
+- The AI page polls status without rescanning models or reading configuration.
+  Full responses remain available and refresh after changes and once a minute.
+
+The full host suite passed, including Ogg pre-skip/end trimming and 120 ms packets,
+DSP reference checks, corrupt-metadata retry, full-card retention, light-API
+authentication/stale-state guards, and UI polling with unsaved edits. Independent
+15-second RTSP checks decoded 448-449 frames on every camera without decode errors,
+at 2688x1520 and 30 fps. Both detectors advanced on cam1/2/3; cam4's original
+disabled settings were preserved. The AI page updated its preview and counters
+without browser errors. Cam4's refreshed dashboard displayed raw luminance with
+an automatic range instead of `/ 255`.
+The subsequent two-minute fleet check preserved every boot ID, service PID and
+configuration hash, with zero sound reconnects. Cam1/2/3 each advanced 228 visual
+frames and 481 sound windows. Minimum available Linux memory was respectively
+6040, 6048 and 4536 KiB; cam4, with detection disabled, reached 5612 KiB.
+These are bounded checks, not a long-term stability guarantee.
+
+A temporary combined stock/sound trial on cam4 reached its low-memory guard;
+its exact original configuration was restored. This did not qualify either bird
+model at native resolution. Sound recognition accuracy after the native-rate
+decoder change still needs controlled playback, independently of stream health.
+
+Cam3 stayed responsive during a manual 15-second recording plus RTSP-viewing
+trial, with no reboot or Majestic/AI/MQTT restart. The saved MP4 decoded without
+errors but contained only 150 video frames over 8.47 seconds, despite a 15.33-second
+catalogue wall-clock duration. Sound analysis briefly warmed up again and recovered.
+The optimizations therefore do not establish reliable recording under concurrent
+native-resolution load; playable/container-complete does not imply lossless media.
+
 ## Fleet Software Alignment, 2026-10-08
 
 All four cameras now use the tested Majestic `master+d8a0721` binary and

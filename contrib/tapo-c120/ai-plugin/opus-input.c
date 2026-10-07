@@ -6,6 +6,8 @@
 #include <string.h>
 
 #define BUFFER_LIMIT 65536
+#define GRANULE_FACTOR (48000 / OPUS_INPUT_RATE)
+#define MAX_SAMPLES (OPUS_INPUT_RATE * 120 / 1000)
 struct opus_input {
     ogg_sync_state sync;
     ogg_stream_state stream;
@@ -46,7 +48,8 @@ static int packet(struct opus_input *s, ogg_packet *p)
         int error;
         s->decoder = opus_decoder_create(OPUS_INPUT_RATE, 1, &error);
         if (!s->decoder) return -1;
-        s->skip = b[10] | b[11] << 8;
+        /* Ogg pre-skip/granules always use 48 kHz, even when decoding at 16 kHz. */
+        s->skip = ((b[10] | b[11] << 8) + GRANULE_FACTOR - 1) / GRANULE_FACTOR;
         int gain = b[16] | b[17] << 8;
         if (gain >= 32768) gain -= 65536;
         if (opus_decoder_ctl(s->decoder, OPUS_SET_GAIN(gain))) return -1;
@@ -57,14 +60,15 @@ static int packet(struct opus_input *s, ogg_packet *p)
         /* Tags are bounded by BUFFER_LIMIT and ignored, never parsed as commands. */
         ++s->headers; return 0;
     }
-    int16_t pcm[5760]; /* Opus permits at most 120 ms per packet. */
+    int16_t pcm[MAX_SAMPLES];
     if (p->bytes <= 0 || p->bytes > BUFFER_LIMIT) return -1;
-    int n = opus_decode(s->decoder, b, p->bytes, pcm, 5760, 0);
+    int n = opus_decode(s->decoder, b, p->bytes, pcm, MAX_SAMPLES, 0);
     if (n < 0) return -1;
-    s->decoded += n;
+    ogg_int64_t start = s->decoded;
+    s->decoded += n * GRANULE_FACTOR;
     if (p->e_o_s) {
-        if (p->granulepos < s->decoded - n || p->granulepos > s->decoded) return -1;
-        n -= s->decoded - p->granulepos;
+        if (p->granulepos < start || p->granulepos > s->decoded) return -1;
+        n = (p->granulepos - start) / GRANULE_FACTOR;
     }
     unsigned skip = s->skip < (unsigned)n ? s->skip : (unsigned)n;
     s->skip -= skip;

@@ -33,12 +33,12 @@ static void pages(struct bytes *b, ogg_stream_state *s)
     }
 }
 
-static void fixture(struct bytes *b, int channels, int gain, struct samples *expected)
+static void fixture(struct bytes *b, int channels, int gain, int preskip, int trim, int long_packet, struct samples *expected)
 {
     ogg_stream_state stream;
     assert(!ogg_stream_init(&stream, 42));
     unsigned char head[19] = "OpusHead";
-    head[8] = 1; head[9] = channels; head[10] = 56; head[11] = 1; /* pre-skip 312 */
+    head[8] = 1; head[9] = channels; head[10] = preskip & 255; head[11] = preskip >> 8;
     head[12] = 128; head[13] = 187; /* informational 48000 Hz */
     head[16] = gain & 255; head[17] = (gain >> 8) & 255;
     ogg_packet p = {.packet=head, .bytes=19, .b_o_s=1};
@@ -47,19 +47,28 @@ static void fixture(struct bytes *b, int channels, int gain, struct samples *exp
     p = (ogg_packet){.packet=tags, .bytes=16, .packetno=1};
     assert(!ogg_stream_packetin(&stream, &p)); pages(b, &stream);
     int error;
-    OpusEncoder *encoder = opus_encoder_create(48000, 1, OPUS_APPLICATION_AUDIO, &error);
-    OpusDecoder *decoder = opus_decoder_create(48000, 1, &error);
+    OpusEncoder *encoder = opus_encoder_create(48000, 1, OPUS_APPLICATION_RESTRICTED_LOWDELAY, &error);
+    OpusDecoder *decoder = opus_decoder_create(16000, 1, &error);
     assert(encoder && decoder);
     assert(!opus_decoder_ctl(decoder, OPUS_SET_GAIN(gain)));
+    assert(!opus_encoder_ctl(encoder, OPUS_SET_VBR(0)));
+    assert(!opus_encoder_ctl(encoder, OPUS_SET_BITRATE(64000)));
+    int skip = (preskip+2)/3, total = long_packet ? 5760 : 960;
     for (int frame = 0; frame < 15; ++frame) {
-        int16_t pcm[960], decoded[960]; unsigned char encoded[4000];
-        for (int i = 0; i < 960; ++i) pcm[i] = 9000 * sin(2 * 3.141592653589793 * 440 * (frame*960+i)/48000);
-        int n = opus_encode(encoder, pcm, 960, encoded, sizeof(encoded));
-        assert(n > 0 && opus_decode(decoder, encoded, n, decoded, 960, 0) == 960);
-        size_t skip = frame == 0 ? 312 : 0, count = 960 - skip - (frame == 14 ? 100 : 0);
-        assert(!collect(decoded + skip, count, expected));
+        int16_t pcm[960], decoded[1920]; unsigned char packets[6][4000], encoded[24000];
+        OpusRepacketizer *rp = opus_repacketizer_create(); assert(rp);
+        for (int part=0;part<total/960;++part) {
+            for (int i = 0; i < 960; ++i) pcm[i] = 9000 * sin(2 * 3.141592653589793 * 440 * (frame*total+part*960+i)/48000);
+            int size = opus_encode(encoder, pcm, 960, packets[part], sizeof(packets[part]));
+            assert(size > 0 && !opus_repacketizer_cat(rp, packets[part], size));
+        }
+        int n = opus_repacketizer_out(rp, encoded, sizeof(encoded)); opus_repacketizer_destroy(rp);
+        assert(n > 0 && opus_decode(decoder, encoded, n, decoded, 1920, 0) == total/3);
+        int count = total/3 - (frame == 14 ? (trim+2)/3 : 0);
+        int drop = skip < count ? skip : count; skip -= drop;
+        assert(!collect(decoded + drop, count-drop, expected));
         p = (ogg_packet){.packet=encoded, .bytes=n, .packetno=frame+2,
-            .granulepos=(frame+1)*960-(frame==14?100:0), .e_o_s=frame==14};
+            .granulepos=(frame+1)*total-(frame==14?trim:0), .e_o_s=frame==14};
         assert(!ogg_stream_packetin(&stream, &p)); pages(b, &stream);
     }
     ogg_stream_clear(&stream); opus_encoder_destroy(encoder); opus_decoder_destroy(decoder);
@@ -87,12 +96,12 @@ int main(void)
 {
     assert(!opus_input_create(NULL, NULL)); opus_input_destroy(NULL);
     for (int gain = -512; gain <= 512; gain += 512) {
-        struct bytes b = {0}; struct samples expected = {0}; fixture(&b, 1, gain, &expected);
+        struct bytes b = {0}; struct samples expected = {0}; fixture(&b, 1, gain, 312, 100, 0, &expected);
         const size_t chunks[] = {1, 7, 97, 4096, 65536};
         for (unsigned i = 0; i < sizeof(chunks)/sizeof(*chunks); ++i) {
             struct samples out = {0}; struct opus_input *s = opus_input_create(collect, &out);
             assert(s && !opus_input_feed(s, NULL, 0) && !feed(s, &b, chunks[i]));
-            assert(out.size == 15*960-312-100 && out.size == expected.size);
+            assert(out.size == (15*960-100)/3-312/3 && out.size == expected.size);
             assert(!memcmp(out.pcm, expected.pcm, out.size*sizeof(int16_t)));
             assert(opus_input_feed(s, b.data, b.size)); /* No chained streams. */
             opus_input_destroy(s);
@@ -101,8 +110,15 @@ int main(void)
         assert(s && feed(s, &b, 31)); opus_input_destroy(s);
         b.data[b.size-1] ^= 1; reject(&b); /* Bad CRC. */
     }
-    struct bytes b = {0}; struct samples out = {0}; fixture(&b, 2, 0, &out); reject(&b);
-    b = (struct bytes){0}; out = (struct samples){0}; fixture(&b, 1, 0, &out);
+    for (int preskip=313;preskip<=1001;preskip+=688) for (int long_packet=0;long_packet<=1;++long_packet) {
+        struct bytes b={0}; struct samples expected={0}, out={0};
+        fixture(&b,1,0,preskip,101,long_packet,&expected);
+        struct opus_input *s=opus_input_create(collect,&out);
+        assert(s && !feed(s,&b,7) && out.size==expected.size);
+        assert(!memcmp(out.pcm,expected.pcm,out.size*sizeof(int16_t))); opus_input_destroy(s);
+    }
+    struct bytes b = {0}; struct samples out = {0}; fixture(&b, 2, 0, 312, 100, 0, &out); reject(&b);
+    b = (struct bytes){0}; out = (struct samples){0}; fixture(&b, 1, 0, 312, 100, 0, &out);
     /* Skip the first audio page: libogg must surface a sequence hole. */
     size_t pos = 0;
     for (int i = 0; i < 2; ++i) {

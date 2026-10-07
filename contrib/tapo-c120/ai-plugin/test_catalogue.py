@@ -41,9 +41,19 @@ def main():
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <fcntl.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <string.h>
 static int full;
+static unsigned metadata_reads;
+unsigned test_reads(void){unsigned n=metadata_reads;metadata_reads=0;return n;}
+int test_openat(int fd,const char *path,int flags,...){
+    mode_t mode=0;
+    if(flags&O_CREAT){va_list ap;va_start(ap,flags);mode=va_arg(ap,int);va_end(ap);}
+    if(strlen(path)==25 && strspn(path,"0123456789")==20 && !strcmp(path+20,".json") && (flags&O_ACCMODE)==O_RDONLY)++metadata_reads;
+    return openat(fd,path,flags,mode);
+}
 void test_full(int value){full=value;}
 int test_fstatfs(int fd,struct statfs *s){int r=syscall(SYS_fstatfs,fd,s);if(!r){s->f_type=0xef53;memset(&s->f_fsid,42,sizeof(s->f_fsid));}return r;}
 int test_fstatvfs(int fd,struct statvfs *s){int r=fstatvfs(fd,s);if(!r && full){s->f_blocks=100000;s->f_frsize=4096;s->f_bavail=0;}return r;}
@@ -53,7 +63,7 @@ int test_fstatvfs(int fd,struct statvfs *s){int r=fstatvfs(fd,s);if(!r && full){
         subprocess.run(['gcc', '-fPIC', '-c', str(shim), '-o', str(root / 'shim.o')], check=True)
         libpath = root / 'catalogue.so'
         subprocess.run(['gcc', '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror',
-                        '-Dfstatfs=test_fstatfs', '-Dfstatvfs=test_fstatvfs',
+                        '-Dfstatfs=test_fstatfs', '-Dfstatvfs=test_fstatvfs', '-Dopenat=test_openat',
                         str(BASE / 'catalogue.c'), str(BASE / 'notify.c'), str(root / 'shim.o'),
                         '-o', str(libpath), *flags], check=True)
         lib = C.CDLL(str(libpath))
@@ -125,6 +135,10 @@ int test_fstatvfs(int fd,struct statvfs *s){int r=fstatvfs(fd,s);if(!r && full){
         first = register('2026-10-07/a space & one.mp4', 'pet')
         second = register('2026-10-07/two.mp4', 'person')
         third = register('2026-10-07/three.mp4')
+        lib.catalogue_work()
+        lib.test_reads()
+        lib.catalogue_work()
+        assert lib.test_reads() == 0, 'idle worker reopened completed recording metadata'
         page = query('limit=1')
         one = page['recordings'][0]
         assert page['hasMore'] and one['detections'][0]['category'] == 'pet'
@@ -173,6 +187,11 @@ int test_fstatvfs(int fd,struct statvfs *s){int r=fstatvfs(fd,s);if(!r && full){
         (media / 'escape.mp4').symlink_to(outside)
         (media / 'bad.mp4').write_bytes(b'not an mp4')
         (media / 'pending.partial').write_bytes(video)
+        state = json.loads((cat / 'state.json').read_text())
+        state['lastScan'] = int(time.time())-61
+        (cat / 'state.json').write_text(json.dumps(state))
+        lib.catalogue_work()
+        assert len(query()['recordings']) == 3, 'recovery scan still runs every minute'
         with active.open('ab'):
             scan()
             clips = query()['recordings']
@@ -193,6 +212,12 @@ int test_fstatvfs(int fd,struct statvfs *s){int r=fstatvfs(fd,s);if(!r && full){
             assert not call('catalogue_valid', {**hook, **change})
         call('catalogue_configure', hook)
         register('hook.mp4', 'pet')
+        pending_path = sorted(cat.glob('[0-9]*.json'))[-1]
+        good = pending_path.read_bytes()
+        pending_path.write_bytes(b'{broken')
+        lib.catalogue_work()
+        assert not requests, 'corrupt metadata was delivered'
+        pending_path.write_bytes(good)
         lib.catalogue_work(); assert requests[-1][0] == '/fail'
         event = requests[-1][1]
         assert event['type'] == 'recording.ready' and event['recordingId'] == event['recording']['id']
@@ -243,6 +268,7 @@ int test_fstatvfs(int fd,struct statvfs *s){int r=fstatvfs(fd,s);if(!r && full){
     print('PASS: catalogue IDs, cursor pages/filters/errors, historical import, native hooks, transaction repair')
     print('PASS: path confinement, symlinks, open files, deletion cleanup, SD generation, persistent webhook retries/expiry')
     print('PASS: full-card AI retention, protected open/partial files, native-recorder ownership, cursor continuity')
+    print('PASS: idle metadata reads eliminated, delayed recovery scan, corrupt pending metadata remains retryable')
 
 
 if __name__ == '__main__':
